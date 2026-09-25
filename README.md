@@ -54,6 +54,7 @@ python -m roleplay_kernel.sidecar --config .\config.json
 - Маршрутизируются `normal`, `regenerate` и `swipe`.
 - `continue`, `impersonate`, quiet generations и group chats не маршрутизируются.
 - В выпадающем списке поддерживаются профили Chat Completion с источниками `OpenAI` и `Custom`; из выбранного профиля используются connection source, URL, model и secret reference, а profile proxy и sampling preset пока не переносятся.
+- Стандартный лимит render-ответа — `8192` токенов, внутренних planner/critic вызовов — `4096`; значение ST `max_tokens` не может уменьшить этот безопасный минимум.
 - Sampler-level control отсутствует; следующий adapter предназначен для `vLLM` или `llama.cpp`.
 - Sidecar process по умолчанию разрешён только на loopback; для удалённого доступа нужен отдельный TLS reverse proxy.
 - UI-extension сам по себе не может установить server plugin; полная версия требует один запуск installer, после чего запуск выполняется кнопкой.

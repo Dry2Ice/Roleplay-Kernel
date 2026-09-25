@@ -170,13 +170,13 @@ class SidecarConfig:
         max_output_tokens = _env_int(
             env,
             "RPK_MAX_OUTPUT_TOKENS",
-            _config_int(data.get("max_output_tokens"), 1200),
+            _config_int(data.get("max_output_tokens"), 8192),
             minimum=1,
         )
         max_internal_tokens = _env_int(
             env,
             "RPK_MAX_INTERNAL_TOKENS",
-            _config_int(data.get("max_internal_tokens"), 1200),
+            _config_int(data.get("max_internal_tokens"), 4096),
             minimum=1,
         )
         max_repairs = _env_int(
@@ -738,7 +738,10 @@ class SessionService:
                     record.session,
                     user_input,
                     external_context=context_prompt,
-                    sampling=envelope.sampling,
+                    sampling=_render_sampling(
+                        envelope.sampling,
+                        self.config.max_output_tokens,
+                    ),
                 )
             record.last_result = result.to_dict()
             record.last_request_key = envelope.request_key
@@ -1618,6 +1621,20 @@ def _message_identity(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).replace("\u200b", "")
     normalized = re.sub(r"[*_`~]", "", normalized)
     return re.sub(r"\s+", " ", normalized).strip().casefold()
+
+
+def _render_sampling(
+    sampling: dict[str, JsonValue],
+    minimum_tokens: int,
+) -> dict[str, JsonValue]:
+    result = dict(sampling)
+    value = result.get("max_tokens")
+    if isinstance(value, int) and not isinstance(value, bool):
+        requested = min(max(value, minimum_tokens), 16384)
+    else:
+        requested = minimum_tokens
+    result["max_tokens"] = requested
+    return result
 
 
 def _request_fingerprint(

@@ -144,8 +144,8 @@ if ($NeedsConfig) {
         mode = "balanced"
         context_window = 32768
         token_budget = 18000
-        max_output_tokens = 1200
-        max_internal_tokens = 1200
+        max_output_tokens = 8192
+        max_internal_tokens = 4096
         max_repairs = 1
         max_context_chars = 16000
         allow_insecure_http = [bool]$AllowInsecureHttp
