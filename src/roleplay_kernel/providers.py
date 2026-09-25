@@ -181,7 +181,21 @@ class OpenAICompatibleProvider:
             raise ProviderError("provider returned invalid JSON") from error
         if not isinstance(data, dict):
             raise ProviderError("provider response must be a JSON object")
-        return self._parse_completion(data)
+        try:
+            return self._parse_completion(data)
+        except _EmptyContentError:
+            if max_tokens is not None and max_tokens >= 2048:
+                raise
+            expanded = _expanded_max_tokens(max_tokens)
+            retry_sampling = dict(sampling or {})
+            retry_sampling["max_tokens"] = expanded
+            return self.complete(
+                messages,
+                temperature=temperature,
+                max_tokens=expanded,
+                json_mode=json_mode,
+                sampling=retry_sampling,
+            )
 
     def _completion_url(self) -> str:
         parsed = _validate_base_url(self.base_url, self.allow_insecure_http)
@@ -196,6 +210,10 @@ class OpenAICompatibleProvider:
 
 
 class _STCsrfError(ProviderError):
+    pass
+
+
+class _EmptyContentError(ProviderError):
     pass
 
 
@@ -258,11 +276,20 @@ class STConnectionProfileProvider:
         _validate_sampling(sampling)
         with self._lock:
             token = self._csrf_token or self._fetch_csrf_token()
-            try:
-                return self._post(messages, token, temperature, max_tokens, json_mode, sampling)
-            except _STCsrfError:
-                token = self._fetch_csrf_token()
-                return self._post(messages, token, temperature, max_tokens, json_mode, sampling)
+            retried_empty = False
+            while True:
+                try:
+                    return self._post(messages, token, temperature, max_tokens, json_mode, sampling)
+                except _STCsrfError:
+                    token = self._fetch_csrf_token()
+                except _EmptyContentError:
+                    if retried_empty:
+                        raise
+                    retried_empty = True
+                    max_tokens = _expanded_max_tokens(max_tokens)
+                    retry_sampling = dict(sampling or {})
+                    retry_sampling["max_tokens"] = max_tokens
+                    sampling = retry_sampling
 
     def _fetch_csrf_token(self) -> str:
         request = urllib.request.Request(
@@ -402,7 +429,7 @@ def _parse_completion(data: dict[str, object], default_model: str) -> Completion
         raise ProviderError("provider choice does not contain a message")
     content = _content_text(message.get("content"))
     if not content:
-        raise ProviderError("provider returned empty content")
+        raise _EmptyContentError("provider returned empty content")
     usage = _usage(data.get("usage"))
     model = data.get("model")
     finish_reason = first.get("finish_reason")
@@ -490,6 +517,11 @@ def _validate_max_tokens(max_tokens: object) -> None:
         return
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
         raise ValueError("max_tokens must be a positive integer")
+
+
+def _expanded_max_tokens(max_tokens: int | None) -> int:
+    current = max_tokens if max_tokens is not None else 2048
+    return min(max(current * 2, 2048), 8192)
 
 
 def _validate_sampling(sampling: Mapping[str, object] | None) -> None:
