@@ -146,6 +146,7 @@ if ($NeedsConfig) {
         token_budget = 18000
         max_output_tokens = 8192
         max_internal_tokens = 4096
+        upstream_timeout_seconds = 300
         max_repairs = 1
         max_context_chars = 16000
         allow_insecure_http = [bool]$AllowInsecureHttp

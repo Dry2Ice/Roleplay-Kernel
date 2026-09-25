@@ -60,6 +60,7 @@ _CONFIG_KEYS = {
     "token_budget",
     "max_output_tokens",
     "max_internal_tokens",
+    "upstream_timeout_seconds",
     "max_repairs",
     "max_context_chars",
     "allow_insecure_http",
@@ -102,6 +103,7 @@ class SidecarConfig:
     token_budget: int
     max_output_tokens: int
     max_internal_tokens: int
+    upstream_timeout_seconds: int
     max_repairs: int
     max_context_chars: int
     allow_insecure_http: bool
@@ -179,6 +181,12 @@ class SidecarConfig:
             _config_int(data.get("max_internal_tokens"), 4096),
             minimum=1,
         )
+        upstream_timeout_seconds = _env_int(
+            env,
+            "RPK_UPSTREAM_TIMEOUT_SECONDS",
+            _config_int(data.get("upstream_timeout_seconds"), 300),
+            minimum=30,
+        )
         max_repairs = _env_int(
             env,
             "RPK_MAX_REPAIRS",
@@ -210,6 +218,7 @@ class SidecarConfig:
             token_budget=token_budget,
             max_output_tokens=max_output_tokens,
             max_internal_tokens=max_internal_tokens,
+            upstream_timeout_seconds=upstream_timeout_seconds,
             max_repairs=max_repairs,
             max_context_chars=max_context_chars,
             allow_insecure_http=allow_insecure_http,
@@ -614,6 +623,7 @@ class SessionService:
             api_key=os.getenv("RPK_UPSTREAM_API_KEY"),
             api_key_env=config.upstream_api_key_env,
             token_parameter=config.upstream_token_parameter,
+            timeout=float(config.upstream_timeout_seconds),
             allow_insecure_http=config.allow_insecure_http,
         )
         self._direct_provider = self.provider
@@ -670,6 +680,7 @@ class SessionService:
                 model=profile.model,
                 secret_id=profile.secret_id,
                 token_parameter=self.config.upstream_token_parameter,
+                timeout=float(self.config.upstream_timeout_seconds),
             )
         except ValueError as error:
             raise SidecarError("invalid_profile", str(error), 400) from error

@@ -455,6 +455,7 @@ def _config(root: Path, *, integration_key: str = TEST_INTEGRATION_KEY) -> Sidec
         token_budget=18000,
         max_output_tokens=1200,
         max_internal_tokens=1200,
+        upstream_timeout_seconds=300,
         max_repairs=1,
         max_context_chars=16000,
         allow_insecure_http=False,
