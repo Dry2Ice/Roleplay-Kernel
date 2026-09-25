@@ -29,7 +29,7 @@ from .modules import (
     ModuleDefinitionError,
     ModuleRegistry,
 )
-from .providers import ChatProvider, OpenAICompatibleProvider
+from .providers import ChatProvider, OpenAICompatibleProvider, STConnectionProfileProvider
 from .utils import ProviderError, parse_json_object
 from .validators import Finding, validate_candidate
 
@@ -57,6 +57,7 @@ __all__ = [
     "PromptPack",
     "ProviderError",
     "RoleplayState",
+    "STConnectionProfileProvider",
     "Session",
     "StaleTurnResultError",
     "StateDelta",

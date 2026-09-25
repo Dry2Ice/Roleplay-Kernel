@@ -150,7 +150,7 @@ if (-not $NoStart) {
     $EnvironmentValue = Get-Item -LiteralPath "Env:$EffectiveApiKeyEnv" -ErrorAction SilentlyContinue
     $MissingApiKey = $null -eq $EnvironmentValue -or [string]::IsNullOrWhiteSpace($EnvironmentValue.Value)
     if ($EffectiveUpstreamBaseUrl.StartsWith("https://") -and $MissingApiKey) {
-        throw "Environment variable $EffectiveApiKeyEnv is not set"
+        Write-Warning "Environment variable $EffectiveApiKeyEnv is not set; direct upstream fallback will be unavailable"
     }
     & $Python -m roleplay_kernel.sidecar --config $ConfigPath
 }

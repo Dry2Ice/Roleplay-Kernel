@@ -4,13 +4,16 @@ import ipaddress
 import json
 import math
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from email.message import Message
-from typing import IO, Literal, Protocol
+from http.cookiejar import CookieJar
+from threading import RLock
+from typing import IO, Literal, Protocol, cast
 
 from .models import ChatMessage, Completion
 from .utils import ProviderError
@@ -168,33 +171,221 @@ class OpenAICompatibleProvider:
         return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, query, ""))
 
     def _parse_completion(self, data: dict[str, object]) -> Completion:
-        choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise ProviderError("provider response does not contain choices")
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            finish_reason = choice.get("finish_reason")
-            if finish_reason is not None and finish_reason not in _ALLOWED_FINISH_REASONS:
-                raise ProviderError(f"provider returned unsupported finish_reason={finish_reason}")
-        first = choices[0]
-        if not isinstance(first, dict):
-            raise ProviderError("provider choice must be an object")
-        message = first.get("message")
-        if not isinstance(message, dict):
-            raise ProviderError("provider choice does not contain a message")
-        content = _content_text(message.get("content"))
-        if not content:
-            raise ProviderError("provider returned empty content")
-        usage = _usage(data.get("usage"))
-        model = data.get("model")
-        finish_reason = first.get("finish_reason")
-        return Completion(
-            content=content,
-            model=model if isinstance(model, str) and model else self.model,
-            usage=usage,
-            finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+        return _parse_completion(data, self.model)
+
+
+class _STCsrfError(ProviderError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class STConnectionProfileProvider:
+    st_base_url: str
+    source: str
+    api_url: str
+    model: str
+    secret_id: str = field(default="", repr=False)
+    timeout: float = 120.0
+    token_parameter: TokenParameter = "max_tokens"
+    _opener: urllib.request.OpenerDirector = field(init=False, repr=False, compare=False)
+    _csrf_token: str | None = field(init=False, default=None, repr=False, compare=False)
+    _lock: RLock = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        normalized_base = _validate_st_base_url(self.st_base_url)
+        _validate_timeout(self.timeout)
+        if not re.fullmatch(r"[a-z0-9_-]{1,64}", self.source):
+            raise ValueError("profile source is invalid")
+        if not isinstance(self.model, str) or not self.model.strip() or len(self.model) > 256:
+            raise ValueError("profile model is invalid")
+        if self.api_url:
+            _validate_base_url(self.api_url, allow_insecure_http=True)
+        elif self.source == "custom":
+            raise ValueError("custom connection profile requires an API URL")
+        if not isinstance(self.secret_id, str) or len(self.secret_id) > 256:
+            raise ValueError("profile secret id is invalid")
+        if self.token_parameter not in {"max_tokens", "max_completion_tokens"}:
+            raise ValueError("unsupported token parameter")
+        object.__setattr__(self, "st_base_url", normalized_base)
+        object.__setattr__(self, "api_url", self.api_url.strip())
+        object.__setattr__(self, "model", self.model.strip())
+        object.__setattr__(
+            self,
+            "_opener",
+            urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(CookieJar()),
+                _NoRedirectHandler(),
+            ),
         )
+        object.__setattr__(self, "_lock", RLock())
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> Completion:
+        if not messages:
+            raise ValueError("messages must not be empty")
+        if not isinstance(json_mode, bool):
+            raise ValueError("json_mode must be a boolean")
+        _validate_temperature(temperature)
+        _validate_max_tokens(max_tokens)
+        with self._lock:
+            token = self._csrf_token or self._fetch_csrf_token()
+            try:
+                return self._post(messages, token, temperature, max_tokens, json_mode)
+            except _STCsrfError:
+                token = self._fetch_csrf_token()
+                return self._post(messages, token, temperature, max_tokens, json_mode)
+
+    def _fetch_csrf_token(self) -> str:
+        request = urllib.request.Request(
+            f"{self.st_base_url}/csrf-token",
+            headers={"Accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as error:
+            error.close()
+            raise ProviderError("SillyTavern CSRF endpoint rejected the request") from error
+        except urllib.error.URLError as error:
+            raise ProviderError("SillyTavern CSRF endpoint is unavailable") from error
+        except TimeoutError as error:
+            raise ProviderError("SillyTavern CSRF request timed out") from error
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ProviderError("SillyTavern CSRF response exceeds the size limit")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ProviderError("SillyTavern CSRF response is invalid JSON") from error
+        token = data.get("token") if isinstance(data, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ProviderError("SillyTavern CSRF response has no token")
+        object.__setattr__(self, "_csrf_token", token)
+        return token
+
+    def _post(
+        self,
+        messages: Sequence[ChatMessage],
+        csrf_token: str,
+        temperature: float | None,
+        max_tokens: int | None,
+        json_mode: bool,
+    ) -> Completion:
+        payload: dict[str, object] = {
+            "chat_completion_source": self.source,
+            "model": self.model,
+            "messages": [message.to_dict() for message in messages],
+            "stream": False,
+            "use_sysprompt": True,
+            "custom_prompt_post_processing": "",
+        }
+        if self.api_url:
+            payload["custom_url"] = self.api_url
+        if self.secret_id:
+            payload["secret_id"] = self.secret_id
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload[self.token_parameter] = max_tokens
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        request = urllib.request.Request(
+            f"{self.st_base_url}/api/backends/chat-completions/generate",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-CSRF-Token": csrf_token,
+            },
+            method="POST",
+        )
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as error:
+            status = error.code
+            error.close()
+            if status == 403:
+                raise _STCsrfError("SillyTavern CSRF validation failed") from error
+            raise ProviderError(f"SillyTavern backend returned HTTP {status}") from error
+        except urllib.error.URLError as error:
+            raise ProviderError("SillyTavern backend request failed") from error
+        except TimeoutError as error:
+            raise ProviderError("SillyTavern backend request timed out") from error
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ProviderError("SillyTavern response exceeds the size limit")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ProviderError("SillyTavern backend returned invalid JSON") from error
+        if not isinstance(data, dict):
+            raise ProviderError("SillyTavern backend response must be an object")
+        error_value = data.get("error")
+        if error_value:
+            message = error_value.get("message") if isinstance(error_value, dict) else error_value
+            detail = str(message)[:500] if message is not None else "unknown upstream error"
+            raise ProviderError(f"SillyTavern backend error: {detail}")
+        if "choices" not in data and isinstance(data.get("data"), dict):
+            data = cast(dict[str, object], data["data"])
+        return _parse_completion(data, self.model)
+
+
+def _validate_st_base_url(base_url: str) -> str:
+    if not isinstance(base_url, str) or not base_url or base_url != base_url.strip():
+        raise ValueError("st_base_url must be a non-empty URL")
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("st_base_url is invalid") from error
+    scheme = parsed.scheme.casefold()
+    if scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise ValueError("st_base_url must use http or https")
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        raise ValueError("st_base_url must not contain userinfo")
+    if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        raise ValueError("st_base_url must be an origin without path or query")
+    if port is not None and not 0 <= port <= 65535:
+        raise ValueError("st_base_url has an invalid port")
+    if scheme == "http" and not _is_loopback_hostname(parsed.hostname):
+        raise ValueError("plain HTTP st_base_url must be loopback")
+    return urllib.parse.urlunsplit((scheme, parsed.netloc, "", "", ""))
+
+
+def _parse_completion(data: dict[str, object], default_model: str) -> Completion:
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ProviderError("provider response does not contain choices")
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        finish_reason = choice.get("finish_reason")
+        if finish_reason is not None and finish_reason not in _ALLOWED_FINISH_REASONS:
+            raise ProviderError(f"provider returned unsupported finish_reason={finish_reason}")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise ProviderError("provider choice must be an object")
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise ProviderError("provider choice does not contain a message")
+    content = _content_text(message.get("content"))
+    if not content:
+        raise ProviderError("provider returned empty content")
+    usage = _usage(data.get("usage"))
+    model = data.get("model")
+    finish_reason = first.get("finish_reason")
+    return Completion(
+        content=content,
+        model=model if isinstance(model, str) and model else default_model,
+        usage=usage,
+        finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+    )
 
 
 def _validate_base_url(base_url: str, allow_insecure_http: bool) -> urllib.parse.SplitResult:

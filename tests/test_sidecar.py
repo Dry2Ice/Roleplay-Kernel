@@ -12,6 +12,7 @@ from typing import cast
 
 from roleplay_kernel import Completion
 from roleplay_kernel.models import ChatMessage, JsonValue
+from roleplay_kernel.providers import STConnectionProfileProvider
 from roleplay_kernel.sidecar import (
     CONTROL_PREFIX,
     ENVELOPE_PREFIX,
@@ -21,6 +22,7 @@ from roleplay_kernel.sidecar import (
     SessionService,
     SidecarConfig,
     SidecarError,
+    STProfileConfig,
     TranscriptItem,
     create_server,
 )
@@ -173,6 +175,43 @@ class SidecarTests(unittest.TestCase):
                     ),
                     "Character: Aria",
                 )
+
+    def test_profile_envelope_round_trip_keeps_secret_reference(self) -> None:
+        envelope = _envelope("chat_profile", "Я вхожу в комнату")
+        profile = STProfileConfig(
+            profile_id="profile-1",
+            st_base_url="http://127.0.0.1:8000",
+            source="custom",
+            api_url="http://127.0.0.1:9000/v1",
+            model="profile-model",
+            secret_id="secret-uuid",
+        )
+        data = envelope.to_dict()
+        profile_data = profile.to_dict()
+        data["upstream_profile"] = profile_data
+
+        parsed = GenerationEnvelope.from_dict(data)
+
+        self.assertEqual(parsed.upstream_profile, profile)
+        self.assertNotIn("api_key", profile_data)
+
+    def test_profile_provider_switches_without_reading_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            scripted = ScriptedProvider([])
+            service = SessionService(_config(Path(temporary)), provider=scripted)
+            profile = STProfileConfig(
+                profile_id="profile-1",
+                st_base_url="http://127.0.0.1:8000",
+                source="openai",
+                api_url="",
+                model="profile-model",
+                secret_id="secret-uuid",
+            )
+
+            service._apply_upstream_profile(profile)
+            self.assertIsInstance(service.engine.provider, STConnectionProfileProvider)
+            service._apply_upstream_profile(None)
+            self.assertIs(service.engine.provider, scripted)
 
     def test_status_detects_transcript_drift_and_ignores_post_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -14,7 +14,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -29,7 +29,12 @@ from .engine import (
     UnknownPendingCommitError,
 )
 from .models import JsonValue, Session, new_id
-from .providers import ChatProvider, OpenAICompatibleProvider, TokenParameter
+from .providers import (
+    ChatProvider,
+    OpenAICompatibleProvider,
+    STConnectionProfileProvider,
+    TokenParameter,
+)
 from .utils import ProviderError
 
 SIDECAR_VERSION = "0.1.0"
@@ -296,6 +301,47 @@ class TranscriptItem:
 
 
 @dataclass(frozen=True, slots=True)
+class STProfileConfig:
+    profile_id: str
+    st_base_url: str
+    source: str
+    api_url: str
+    model: str
+    secret_id: str = field(default="", repr=False)
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "profile_id": self.profile_id,
+            "st_base_url": self.st_base_url,
+            "source": self.source,
+            "api_url": self.api_url,
+            "model": self.model,
+            "secret_id": self.secret_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, JsonValue]) -> STProfileConfig:
+        profile_id = _required_string(data, "profile_id")
+        st_base_url = _required_string(data, "st_base_url")
+        source = _required_string(data, "source")
+        api_url = _config_string(data.get("api_url"), "")
+        model = _required_string(data, "model")
+        secret_id = _config_string(data.get("secret_id"), "")
+        if len(profile_id) > 128 or len(source) > 64 or len(model) > 256:
+            raise SidecarError("invalid_profile", "connection profile fields are too long")
+        if len(api_url) > 2048 or len(secret_id) > 256:
+            raise SidecarError("invalid_profile", "connection profile fields are too long")
+        return cls(
+            profile_id=profile_id,
+            st_base_url=st_base_url,
+            source=source,
+            api_url=api_url,
+            model=model,
+            secret_id=secret_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationEnvelope:
     protocol: int
     session_id: str
@@ -306,9 +352,10 @@ class GenerationEnvelope:
     pov: str
     tense: str
     operation: str = "generate"
+    upstream_profile: STProfileConfig | None = None
 
     def to_dict(self) -> dict[str, JsonValue]:
-        return {
+        data: dict[str, JsonValue] = {
             "protocol": self.protocol,
             "operation": self.operation,
             "session_id": self.session_id,
@@ -319,6 +366,9 @@ class GenerationEnvelope:
             "pov": self.pov,
             "tense": self.tense,
         }
+        if self.upstream_profile is not None:
+            data["upstream_profile"] = self.upstream_profile.to_dict()
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, JsonValue]) -> GenerationEnvelope:
@@ -350,6 +400,12 @@ class GenerationEnvelope:
         operation = _optional_string(data, "operation", "generate")
         if operation != "generate":
             raise SidecarError("unsupported_operation", "operation is not supported")
+        profile_value = data.get("upstream_profile")
+        profile = (
+            STProfileConfig.from_dict(_object(profile_value, "upstream_profile"))
+            if profile_value is not None
+            else None
+        )
         return cls(
             protocol=protocol,
             session_id=session_id,
@@ -365,6 +421,7 @@ class GenerationEnvelope:
             ),
             tense=_choice(data, "tense", "past", {"past", "present", "future"}),
             operation=operation,
+            upstream_profile=profile,
         )
 
 
@@ -554,6 +611,10 @@ class SessionService:
             token_parameter=config.upstream_token_parameter,
             allow_insecure_http=config.allow_insecure_http,
         )
+        self._direct_provider = self.provider
+        self._profile_provider: STConnectionProfileProvider | None = None
+        self._profile_signature: tuple[str, str, str, str, str, str] | None = None
+        self._generation_lock = threading.RLock()
         self.engine = Engine(
             self.provider,
             compiler=ContextCompiler(token_budget=config.token_budget),
@@ -573,7 +634,44 @@ class SessionService:
             "service": "roleplay-kernel-sidecar",
             "version": SIDECAR_VERSION,
             "protocol": PROTOCOL_VERSION,
+            "upstream_profile_id": (
+                self._profile_signature[0] if self._profile_signature is not None else None
+            ),
         }
+
+    def _apply_upstream_profile(self, profile: STProfileConfig | None) -> None:
+        if profile is None:
+            if self._profile_signature is not None:
+                self.provider = self._direct_provider
+                self.engine.provider = self._direct_provider
+                self._profile_provider = None
+                self._profile_signature = None
+            return
+        signature = (
+            profile.profile_id,
+            profile.st_base_url,
+            profile.source,
+            profile.api_url,
+            profile.model,
+            profile.secret_id,
+        )
+        if signature == self._profile_signature and self._profile_provider is not None:
+            return
+        try:
+            provider = STConnectionProfileProvider(
+                st_base_url=profile.st_base_url,
+                source=profile.source,
+                api_url=profile.api_url,
+                model=profile.model,
+                secret_id=profile.secret_id,
+                token_parameter=self.config.upstream_token_parameter,
+            )
+        except ValueError as error:
+            raise SidecarError("invalid_profile", str(error), 400) from error
+        self._profile_provider = provider
+        self._profile_signature = signature
+        self.provider = provider
+        self.engine.provider = provider
 
     def generate(
         self,
@@ -629,11 +727,13 @@ class SessionService:
             conversation, user_input = _transcript_exchange(envelope.transcript)
             self._sync_transcript(record.session, conversation)
             record.checkpoint = record.session.to_dict()
-            result = self.engine.advance(
-                record.session,
-                user_input,
-                external_context=context_prompt,
-            )
+            with self._generation_lock:
+                self._apply_upstream_profile(envelope.upstream_profile)
+                result = self.engine.advance(
+                    record.session,
+                    user_input,
+                    external_context=context_prompt,
+                )
             record.last_result = result.to_dict()
             record.last_request_key = envelope.request_key
             record.last_request_fingerprint = request_fingerprint
@@ -644,7 +744,11 @@ class SessionService:
             self.store.save(record)
             return TurnPayload(
                 text=result.text,
-                model=self.config.upstream_model,
+                model=(
+                    envelope.upstream_profile.model
+                    if envelope.upstream_profile is not None
+                    else self.config.upstream_model
+                ),
                 usage=result.usage,
                 session_id=record.session.id,
                 state_version=record.session.state.version,
@@ -739,7 +843,11 @@ class SessionService:
             status = "ok"
         return TurnPayload(
             text=_required_string(result, "text"),
-            model=self.config.upstream_model,
+            model=(
+                self._profile_provider.model
+                if self._profile_provider is not None
+                else self.config.upstream_model
+            ),
             usage={},
             session_id=record.session.id,
             state_version=record.session.state.version,
@@ -1491,8 +1599,9 @@ def _request_fingerprint(
         ]
         for item in envelope.transcript
     ]
+    profile = envelope.upstream_profile.to_dict() if envelope.upstream_profile is not None else None
     payload = json.dumps(
-        [envelope.generation_type, transcript, context_prompt.strip()],
+        [envelope.generation_type, transcript, context_prompt.strip(), profile],
         ensure_ascii=False,
         separators=(",", ":"),
     )

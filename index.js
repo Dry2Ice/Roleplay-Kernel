@@ -4,12 +4,14 @@ const ENVELOPE_PREFIX = '[ROLEPLAY_KERNEL_ENVELOPE_V1]';
 const CONTROL_PREFIX = '[ROLEPLAY_KERNEL_CONTROL_V1]';
 const CONTROL_MODEL_PREFIX = 'roleplay-kernel-control/';
 const SUPPORTED_GENERATIONS = new Set(['normal', 'regenerate', 'swipe']);
+const SUPPORTED_PROFILE_SOURCES = new Set(['openai', 'custom']);
 const DEFAULT_SETTINGS = Object.freeze({
     enabled: false,
     autoRoute: true,
     sidecarUrl: 'http://127.0.0.1:8787/v1',
     integrationKey: '',
     model: 'roleplay-kernel',
+    profileId: '',
     language: 'ru',
     pov: 'third_person_limited',
     tense: 'past',
@@ -40,6 +42,107 @@ function ensureSettings() {
     }
     settings = stored;
     return settings;
+}
+
+function connectionProfiles() {
+    const context = getContext();
+    if (context.extensionSettings?.disabledExtensions?.includes('connection-manager')) {
+        return [];
+    }
+    const manager = context.extensionSettings?.connectionManager;
+    if (!Array.isArray(manager?.profiles)) {
+        return [];
+    }
+    return manager.profiles.filter(profile => {
+        if (!profile || profile.mode !== 'cc' || !profile.id) {
+            return false;
+        }
+        const source = profileSource(profile);
+        return Boolean(
+            source
+            && SUPPORTED_PROFILE_SOURCES.has(source)
+            && profile.model
+            && !profile.proxy
+            && (source !== 'custom' || profile['api-url'])
+        );
+    });
+}
+
+function profileSource(profile) {
+    const apiMap = getContext().CONNECT_API_MAP || {};
+    const source = apiMap[profile?.api]?.source;
+    return typeof source === 'string' && source ? source : null;
+}
+
+function selectedConnectionProfile() {
+    const manager = getContext().extensionSettings?.connectionManager;
+    const profileId = settings?.profileId || manager?.selectedProfile;
+    if (!profileId) {
+        return null;
+    }
+    return connectionProfiles().find(
+        profile => String(profile.id) === String(profileId),
+    ) || null;
+}
+
+function profilePayload(profile) {
+    const source = profileSource(profile);
+    if (!source) {
+        return null;
+    }
+    return {
+        profile_id: String(profile.id),
+        st_base_url: window.location.origin,
+        source,
+        api_url: String(profile['api-url'] || ''),
+        model: String(profile.model || ''),
+        secret_id: String(profile['secret-id'] || ''),
+    };
+}
+
+function refreshProfileOptions() {
+    if (!settings) {
+        return;
+    }
+    const select = document.getElementById('rpk_profile');
+    const hint = document.getElementById('rpk_profile_hint');
+    if (!select) {
+        return;
+    }
+    const profiles = connectionProfiles();
+    const manager = getContext().extensionSettings?.connectionManager;
+    if (!settings.profileId && manager?.selectedProfile) {
+        const selected = profiles.find(profile => String(profile.id) === String(manager.selectedProfile));
+        if (selected) {
+            settings.profileId = String(selected.id);
+            saveSettings();
+        }
+    } else if (
+        settings.profileId
+        && Array.isArray(manager?.profiles)
+        && !profiles.some(profile => String(profile.id) === String(settings.profileId))
+    ) {
+        settings.profileId = '';
+        saveSettings();
+    }
+    select.replaceChildren();
+    const directOption = document.createElement('option');
+    directOption.value = '';
+    directOption.textContent = 'Прямой upstream из sidecar config';
+    select.append(directOption);
+    for (const profile of profiles) {
+        const option = document.createElement('option');
+        option.value = String(profile.id);
+        option.textContent = `${profile.name || profile.id} · ${profileSource(profile)}`;
+        select.append(option);
+    }
+    select.value = settings.profileId;
+    if (hint) {
+        const selected = selectedConnectionProfile();
+        hint.textContent = selected
+            ? `Профиль: ${selected.name || selected.id}; API key остаётся в secrets.json ST.`
+            : 'Выберите сохранённый профиль ST или используйте ручную конфигурацию sidecar.';
+    }
 }
 
 function saveSettings() {
@@ -215,6 +318,10 @@ function onPromptReady(data) {
         pov: settings.pov,
         tense: settings.tense,
     };
+    const profile = selectedConnectionProfile();
+    if (profile) {
+        envelope.upstream_profile = profilePayload(profile);
+    }
     if (!Array.isArray(data.chat)) {
         return;
     }
@@ -481,6 +588,7 @@ function bindUi() {
     const sidecarUrl = document.getElementById('rpk_sidecar_url');
     const integrationKey = document.getElementById('rpk_integration_key');
     const model = document.getElementById('rpk_model');
+    const profile = document.getElementById('rpk_profile');
     const language = document.getElementById('rpk_language');
     const autoRoute = document.getElementById('rpk_auto_route');
     const activate = document.getElementById('rpk_activate');
@@ -494,6 +602,7 @@ function bindUi() {
     model.value = settings.model;
     language.value = settings.language;
     autoRoute.checked = settings.autoRoute;
+    refreshProfileOptions();
     sidecarUrl.addEventListener('change', () => {
         try {
             settings.sidecarUrl = validateSidecarUrl(sidecarUrl.value);
@@ -511,6 +620,11 @@ function bindUi() {
         settings.model = model.value.trim() || DEFAULT_SETTINGS.model;
         model.value = settings.model;
         saveSettings();
+    });
+    profile.addEventListener('change', () => {
+        settings.profileId = profile.value;
+        saveSettings();
+        refreshProfileOptions();
     });
     language.addEventListener('change', () => {
         settings.language = language.value;
@@ -577,6 +691,20 @@ function registerEvents() {
     context.eventSource.on(context.eventTypes.MESSAGE_EDITED, markDesynchronized);
     context.eventSource.on(context.eventTypes.MESSAGE_DELETED, markDesynchronized);
     context.eventSource.on(context.eventTypes.MESSAGE_SWIPED, markDesynchronized);
+    const refreshProfiles = () => {
+        refreshProfileOptions();
+        if (settings?.enabled) {
+            void refreshStatus({ silent: true });
+        }
+    };
+    for (const eventName of [
+        'CONNECTION_PROFILE_LOADED',
+        'CONNECTION_PROFILE_CREATED',
+        'CONNECTION_PROFILE_UPDATED',
+        'CONNECTION_PROFILE_DELETED',
+    ]) {
+        context.eventSource.on(context.eventTypes[eventName], refreshProfiles);
+    }
 }
 
 export function onActivate() {

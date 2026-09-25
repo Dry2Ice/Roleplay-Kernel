@@ -11,6 +11,13 @@
             </div>
             <div id="rpk_details" class="rpk-details"></div>
             <label class="rpk-field">
+                <span>ST connection profile</span>
+                <select id="rpk_profile">
+                    <option value="">Прямой upstream из sidecar config</option>
+                </select>
+            </label>
+            <small id="rpk_profile_hint" class="rpk-details"></small>
+            <label class="rpk-field">
                 <span>Sidecar URL</span>
                 <input id="rpk_sidecar_url" type="text" autocomplete="off" />
             </label>
@@ -20,7 +27,7 @@
             </label>
             <div class="rpk-grid">
                 <label class="rpk-field">
-                    <span>Model ID</span>
+                    <span>Model ID (fallback)</span>
                     <input id="rpk_model" type="text" autocomplete="off" />
                 </label>
                 <label class="rpk-field">

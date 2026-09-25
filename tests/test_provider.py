@@ -15,6 +15,7 @@ from roleplay_kernel.providers import (
     MAX_ERROR_RESPONSE_BYTES,
     MAX_RESPONSE_BYTES,
     OpenAICompatibleProvider,
+    STConnectionProfileProvider,
 )
 from roleplay_kernel.utils import ProviderError
 
@@ -50,6 +51,18 @@ class FakeOpener:
         if isinstance(self.result, urllib.error.HTTPError):
             raise self.result
         return self.result
+
+
+class SequenceOpener:
+    def __init__(self, results: list[FakeResponse]) -> None:
+        self.results = list(results)
+        self.requests: list[urllib.request.Request] = []
+
+    def open(self, request: urllib.request.Request, timeout: float) -> FakeResponse:
+        self.requests.append(request)
+        if not self.results:
+            raise AssertionError("unexpected provider call")
+        return self.results.pop(0)
 
 
 def _response(content: str = "hello", finish_reason: object = "stop") -> bytes:
@@ -162,6 +175,48 @@ class ProviderRequestTests(unittest.TestCase):
                     self.assertRaisesRegex(ProviderError, message),
                 ):
                     provider.complete((ChatMessage(role="user", content="hello"),))
+
+
+class STProfileProviderTests(unittest.TestCase):
+    def test_profile_request_uses_st_csrf_and_secret_id(self) -> None:
+        opener = SequenceOpener(
+            [
+                FakeResponse(json.dumps({"token": "csrf-token"}).encode()),
+                FakeResponse(_response("profiled")),
+            ]
+        )
+        with patch("urllib.request.build_opener", return_value=opener):
+            provider = STConnectionProfileProvider(
+                st_base_url="http://127.0.0.1:8000",
+                source="custom",
+                api_url="http://127.0.0.1:9000/v1",
+                model="profile-model",
+                secret_id="secret-uuid",
+            )
+            result = provider.complete(
+                (ChatMessage(role="user", content="hello"),),
+                max_tokens=32,
+                json_mode=True,
+            )
+
+        self.assertEqual(result.content, "profiled")
+        self.assertEqual(len(opener.requests), 2)
+        self.assertEqual(opener.requests[0].full_url, "http://127.0.0.1:8000/csrf-token")
+        self.assertEqual(
+            opener.requests[1].full_url,
+            "http://127.0.0.1:8000/api/backends/chat-completions/generate",
+        )
+        self.assertEqual(opener.requests[1].get_header("X-csrf-token"), "csrf-token")
+        body = opener.requests[1].data
+        self.assertIsInstance(body, bytes)
+        if not isinstance(body, bytes):
+            self.fail("request data is not bytes")
+        payload = json.loads(body)
+        self.assertEqual(payload["chat_completion_source"], "custom")
+        self.assertEqual(payload["custom_url"], "http://127.0.0.1:9000/v1")
+        self.assertEqual(payload["secret_id"], "secret-uuid")
+        self.assertNotIn("reverse_proxy", payload)
+        self.assertNotIn("proxy_password", payload)
 
 
 class ProviderValidationTests(unittest.TestCase):
