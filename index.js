@@ -45,6 +45,11 @@ function ensureSettings() {
     return settings;
 }
 
+function profileUsesProxy(profile) {
+    const value = String(profile?.proxy ?? '').trim().toLowerCase();
+    return Boolean(value && !['none', 'null', 'undefined'].includes(value));
+}
+
 function connectionProfiles() {
     const context = getContext();
     if (context.extensionSettings?.disabledExtensions?.includes('connection-manager')) {
@@ -63,7 +68,7 @@ function connectionProfiles() {
             source
             && SUPPORTED_PROFILE_SOURCES.has(source)
             && profile.model
-            && !profile.proxy
+            && !profileUsesProxy(profile)
             && (source !== 'custom' || profile['api-url'])
         );
     });
