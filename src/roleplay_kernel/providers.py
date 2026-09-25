@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -217,6 +218,10 @@ class _EmptyContentError(ProviderError):
     pass
 
 
+class _RateLimitedError(ProviderError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class STConnectionProfileProvider:
     st_base_url: str
@@ -228,6 +233,7 @@ class STConnectionProfileProvider:
     token_parameter: TokenParameter = "max_tokens"
     _opener: urllib.request.OpenerDirector = field(init=False, repr=False, compare=False)
     _csrf_token: str | None = field(init=False, default=None, repr=False, compare=False)
+    _rate_limit_until: float = field(init=False, default=0.0, repr=False, compare=False)
     _lock: RLock = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -277,11 +283,17 @@ class STConnectionProfileProvider:
         with self._lock:
             token = self._csrf_token or self._fetch_csrf_token()
             retried_empty = False
+            rate_limit_retries = 0
             while True:
+                self._wait_for_rate_limit()
                 try:
                     return self._post(messages, token, temperature, max_tokens, json_mode, sampling)
                 except _STCsrfError:
                     token = self._fetch_csrf_token()
+                except _RateLimitedError:
+                    if rate_limit_retries >= 2:
+                        raise
+                    rate_limit_retries += 1
                 except _EmptyContentError:
                     if retried_empty:
                         raise
@@ -290,6 +302,18 @@ class STConnectionProfileProvider:
                     retry_sampling = dict(sampling or {})
                     retry_sampling["max_tokens"] = max_tokens
                     sampling = retry_sampling
+
+    def _mark_rate_limited(self) -> None:
+        object.__setattr__(
+            self,
+            "_rate_limit_until",
+            max(self._rate_limit_until, time.monotonic() + 60.0),
+        )
+
+    def _wait_for_rate_limit(self) -> None:
+        remaining = self._rate_limit_until - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
 
     def _fetch_csrf_token(self) -> str:
         request = urllib.request.Request(
@@ -366,6 +390,9 @@ class STConnectionProfileProvider:
             error.close()
             if status == 403:
                 raise _STCsrfError("SillyTavern CSRF validation failed") from error
+            if status == 429:
+                self._mark_rate_limited()
+                raise _RateLimitedError("SillyTavern backend rate limit reached") from error
             raise ProviderError(f"SillyTavern backend returned HTTP {status}") from error
         except urllib.error.URLError as error:
             raise ProviderError("SillyTavern backend request failed") from error
@@ -383,6 +410,9 @@ class STConnectionProfileProvider:
         if error_value:
             message = error_value.get("message") if isinstance(error_value, dict) else error_value
             detail = str(message)[:500] if message is not None else "unknown upstream error"
+            if _looks_rate_limited(detail):
+                self._mark_rate_limited()
+                raise _RateLimitedError("SillyTavern backend rate limit reached")
             raise ProviderError(f"SillyTavern backend error: {detail}")
         if "choices" not in data and isinstance(data.get("data"), dict):
             data = cast(dict[str, object], data["data"])
@@ -517,6 +547,14 @@ def _validate_max_tokens(max_tokens: object) -> None:
         return
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
         raise ValueError("max_tokens must be a positive integer")
+
+
+def _looks_rate_limited(detail: str) -> bool:
+    normalized = detail.casefold()
+    return any(
+        marker in normalized
+        for marker in ("rate limit", "rate_limit", "too many requests", "http 429", "429")
+    )
 
 
 def _expanded_max_tokens(max_tokens: int | None) -> int:
