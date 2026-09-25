@@ -353,6 +353,7 @@ class GenerationEnvelope:
     tense: str
     operation: str = "generate"
     upstream_profile: STProfileConfig | None = None
+    sampling: dict[str, JsonValue] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, JsonValue]:
         data: dict[str, JsonValue] = {
@@ -365,6 +366,7 @@ class GenerationEnvelope:
             "language": self.language,
             "pov": self.pov,
             "tense": self.tense,
+            "sampling": dict(self.sampling),
         }
         if self.upstream_profile is not None:
             data["upstream_profile"] = self.upstream_profile.to_dict()
@@ -406,6 +408,8 @@ class GenerationEnvelope:
             if profile_value is not None
             else None
         )
+        sampling_value = data.get("sampling")
+        sampling = _object(sampling_value, "sampling") if sampling_value is not None else {}
         return cls(
             protocol=protocol,
             session_id=session_id,
@@ -422,6 +426,7 @@ class GenerationEnvelope:
             tense=_choice(data, "tense", "past", {"past", "present", "future"}),
             operation=operation,
             upstream_profile=profile,
+            sampling=sampling,
         )
 
 
@@ -733,6 +738,7 @@ class SessionService:
                     record.session,
                     user_input,
                     external_context=context_prompt,
+                    sampling=envelope.sampling,
                 )
             record.last_result = result.to_dict()
             record.last_request_key = envelope.request_key
@@ -1109,8 +1115,9 @@ class SidecarRequestHandler(BaseHTTPRequestHandler):
         except (StaleTurnResultError, UnknownPendingCommitError):
             self._send_error_json(409, "stale_session", "session state changed; refresh and retry")
             return
-        except ProviderError:
-            self._send_error_json(502, "upstream_error", "upstream provider request failed")
+        except ProviderError as error:
+            detail = str(error)[:500] or "upstream provider request failed"
+            self._send_error_json(502, "upstream_error", detail)
             return
         except OSError:
             self._send_error_json(503, "storage_error", "session storage is unavailable")
@@ -1628,7 +1635,13 @@ def _request_fingerprint(
     ]
     profile = envelope.upstream_profile.to_dict() if envelope.upstream_profile is not None else None
     payload = json.dumps(
-        [envelope.generation_type, transcript, context_prompt.strip(), profile],
+        [
+            envelope.generation_type,
+            transcript,
+            context_prompt.strip(),
+            profile,
+            envelope.sampling,
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     )

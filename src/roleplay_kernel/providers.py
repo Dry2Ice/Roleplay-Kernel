@@ -23,6 +23,22 @@ MAX_RESPONSE_BYTES = 1_048_576
 MAX_ERROR_RESPONSE_BYTES = 65_536
 _PROTECTED_BODY_KEYS = frozenset({"model", "messages", "stream", "response_format"})
 _ALLOWED_FINISH_REASONS = frozenset({"stop", "end_turn", "eos"})
+_ALLOWED_SAMPLING_KEYS = frozenset(
+    {
+        "temperature",
+        "max_tokens",
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "stop",
+        "seed",
+        "n",
+        "logit_bias",
+        "top_k",
+        "min_p",
+        "repetition_penalty",
+    }
+)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -46,6 +62,7 @@ class ChatProvider(Protocol):
         temperature: float | None = None,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
     ) -> Completion:
         ...
 
@@ -88,6 +105,7 @@ class OpenAICompatibleProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
     ) -> Completion:
         if not messages:
             raise ValueError("messages must not be empty")
@@ -95,6 +113,7 @@ class OpenAICompatibleProvider:
             raise ValueError("json_mode must be a boolean")
         _validate_temperature(temperature)
         _validate_max_tokens(max_tokens)
+        _validate_sampling(sampling)
         _validate_extra_body(self.extra_body)
         payload: dict[str, object] = {
             "model": self.model,
@@ -108,6 +127,8 @@ class OpenAICompatibleProvider:
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
         payload.update(self.extra_body)
+        if sampling:
+            payload.update(_sampling_payload(sampling))
 
         headers: dict[str, str] = {
             "Accept": "application/json",
@@ -226,6 +247,7 @@ class STConnectionProfileProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
     ) -> Completion:
         if not messages:
             raise ValueError("messages must not be empty")
@@ -233,13 +255,14 @@ class STConnectionProfileProvider:
             raise ValueError("json_mode must be a boolean")
         _validate_temperature(temperature)
         _validate_max_tokens(max_tokens)
+        _validate_sampling(sampling)
         with self._lock:
             token = self._csrf_token or self._fetch_csrf_token()
             try:
-                return self._post(messages, token, temperature, max_tokens, json_mode)
+                return self._post(messages, token, temperature, max_tokens, json_mode, sampling)
             except _STCsrfError:
                 token = self._fetch_csrf_token()
-                return self._post(messages, token, temperature, max_tokens, json_mode)
+                return self._post(messages, token, temperature, max_tokens, json_mode, sampling)
 
     def _fetch_csrf_token(self) -> str:
         request = urllib.request.Request(
@@ -276,6 +299,7 @@ class STConnectionProfileProvider:
         temperature: float | None,
         max_tokens: int | None,
         json_mode: bool,
+        sampling: Mapping[str, object] | None,
     ) -> Completion:
         payload: dict[str, object] = {
             "chat_completion_source": self.source,
@@ -295,6 +319,8 @@ class STConnectionProfileProvider:
             payload[self.token_parameter] = max_tokens
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if sampling:
+            payload.update(_sampling_payload(sampling))
         request = urllib.request.Request(
             f"{self.st_base_url}/api/backends/chat-completions/generate",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -464,6 +490,27 @@ def _validate_max_tokens(max_tokens: object) -> None:
         return
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
         raise ValueError("max_tokens must be a positive integer")
+
+
+def _validate_sampling(sampling: Mapping[str, object] | None) -> None:
+    if sampling is None:
+        return
+    unknown = sorted(set(sampling) - _ALLOWED_SAMPLING_KEYS)
+    if unknown:
+        raise ValueError(f"unsupported sampling fields: {', '.join(unknown)}")
+    if "temperature" in sampling:
+        _validate_temperature(sampling["temperature"])
+    if "max_tokens" in sampling:
+        _validate_max_tokens(sampling["max_tokens"])
+    try:
+        json.dumps(dict(sampling), allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise ValueError("sampling values must be JSON serializable") from error
+
+
+def _sampling_payload(sampling: Mapping[str, object]) -> dict[str, object]:
+    _validate_sampling(sampling)
+    return dict(sampling)
 
 
 def _validate_headers(headers: Mapping[str, str]) -> None:

@@ -97,6 +97,7 @@ class ProviderRequestTests(unittest.TestCase):
                 temperature=0.25,
                 max_tokens=17,
                 json_mode=True,
+                sampling={"top_p": 0.9, "frequency_penalty": 0.2},
             )
 
         self.assertEqual(result.content, "hello")
@@ -117,6 +118,8 @@ class ProviderRequestTests(unittest.TestCase):
         self.assertEqual(payload["messages"], [{"role": "user", "content": "hello"}])
         self.assertEqual(payload["max_tokens"], 17)
         self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["top_p"], 0.9)
+        self.assertEqual(payload["frequency_penalty"], 0.2)
         self.assertIs(payload["stream"], False)
 
     def test_successful_response_read_is_bounded(self) -> None:

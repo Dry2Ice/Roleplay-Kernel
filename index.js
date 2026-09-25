@@ -6,6 +6,20 @@ const CONTROL_MODEL_PREFIX = 'roleplay-kernel-control/';
 const RUNTIME_PLUGIN_ID = 'roleplay-kernel';
 const SUPPORTED_GENERATIONS = new Set(['normal', 'regenerate', 'swipe']);
 const SUPPORTED_PROFILE_SOURCES = new Set(['openai', 'custom']);
+const SAMPLING_FIELDS = [
+    'temperature',
+    'max_tokens',
+    'top_p',
+    'frequency_penalty',
+    'presence_penalty',
+    'stop',
+    'seed',
+    'n',
+    'logit_bias',
+    'top_k',
+    'min_p',
+    'repetition_penalty',
+];
 const DEFAULT_SETTINGS = Object.freeze({
     enabled: false,
     autoRoute: true,
@@ -335,6 +349,31 @@ function onPromptReady(data) {
     });
 }
 
+function attachSampling(request) {
+    const message = Array.isArray(request.messages)
+        ? request.messages.find(item => (
+            typeof item?.content === 'string'
+            && item.content.includes(ENVELOPE_PREFIX)
+        ))
+        : null;
+    if (!message) {
+        return;
+    }
+    try {
+        const envelope = JSON.parse(message.content.slice(message.content.indexOf(ENVELOPE_PREFIX) + ENVELOPE_PREFIX.length));
+        const sampling = {};
+        for (const field of SAMPLING_FIELDS) {
+            if (Object.prototype.hasOwnProperty.call(request, field) && request[field] != null) {
+                sampling[field] = request[field];
+            }
+        }
+        envelope.sampling = sampling;
+        message.content = ENVELOPE_PREFIX + JSON.stringify(envelope);
+    } catch {
+        return;
+    }
+}
+
 function onSettingsReady(request) {
     const type = String(request.type || currentGenerationType);
     if (
@@ -346,6 +385,7 @@ function onSettingsReady(request) {
         return;
     }
     try {
+        attachSampling(request);
         request.chat_completion_source = 'custom';
         request.custom_url = validateSidecarUrl(settings.sidecarUrl);
         request.model = DEFAULT_SETTINGS.model;
@@ -474,30 +514,24 @@ async function assertSidecarIdentity(force = false) {
 }
 
 async function controlTunnel(action, payload = {}) {
-    const context = getContext();
     const sidecarUrl = await assertSidecarIdentity();
-    const body = {
-        chat_completion_source: 'custom',
-        custom_url: sidecarUrl,
-        model: `${CONTROL_MODEL_PREFIX}${action}`,
-        type: 'quiet',
-        reverse_proxy: '',
-        messages: [{
-            role: 'system',
-            content: CONTROL_PREFIX + JSON.stringify(payload),
-        }],
-        temperature: 0,
-        max_tokens: 4096,
-        stream: false,
-        custom_include_body: '',
-        custom_exclude_body: '',
-        custom_include_headers: integrationHeaders(),
-        custom_prompt_post_processing: '',
-    };
-    const response = await fetch('/api/backends/chat-completions/generate', {
+    const response = await fetch(`${sidecarUrl}/chat/completions`, {
         method: 'POST',
-        headers: context.getRequestHeaders(),
-        body: JSON.stringify(body),
+        headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${settings.integrationKey}`,
+        },
+        body: JSON.stringify({
+            model: `${CONTROL_MODEL_PREFIX}${action}`,
+            messages: [{
+                role: 'system',
+                content: CONTROL_PREFIX + JSON.stringify(payload),
+            }],
+            temperature: 0,
+            max_tokens: 4096,
+            stream: false,
+        }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data?.error) {

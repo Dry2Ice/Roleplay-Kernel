@@ -5,7 +5,7 @@ import hmac
 import json
 import math
 import secrets
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -226,6 +226,7 @@ class Engine:
         forced_modules: Iterable[str] = (),
         disabled_modules: Iterable[str] = (),
         external_context: str = "",
+        sampling: Mapping[str, JsonValue] | None = None,
     ) -> TurnResult:
         with session._lock:
             return self._advance_locked(
@@ -234,6 +235,7 @@ class Engine:
                 forced_modules=forced_modules,
                 disabled_modules=disabled_modules,
                 external_context=external_context,
+                sampling=sampling,
             )
 
     def _advance_locked(
@@ -244,6 +246,7 @@ class Engine:
         forced_modules: Iterable[str],
         disabled_modules: Iterable[str],
         external_context: str,
+        sampling: Mapping[str, JsonValue] | None,
     ) -> TurnResult:
         content = user_input.strip()
         if not content:
@@ -280,6 +283,7 @@ class Engine:
             max_tokens=self.config.max_output_tokens,
             json_mode=False,
             completions=completions,
+            sampling=sampling,
         ).content.strip()
         if not candidate:
             raise RuntimeError("renderer returned an empty post")
@@ -305,6 +309,7 @@ class Engine:
                     activations,
                     completions,
                     external_context,
+                    sampling,
                 ).strip()
                 if not repaired:
                     candidate_findings = merge_findings(
@@ -792,6 +797,7 @@ class Engine:
         activations: tuple[ModuleActivation, ...],
         completions: list[Completion],
         external_context: str,
+        sampling: Mapping[str, JsonValue] | None,
     ) -> str:
         prompt = self.compiler.compile_repair(
             state=session._state,
@@ -807,6 +813,7 @@ class Engine:
             max_tokens=self.config.max_output_tokens,
             json_mode=False,
             completions=completions,
+            sampling=sampling,
         ).content
 
     def _complete(
@@ -817,6 +824,7 @@ class Engine:
         max_tokens: int,
         json_mode: bool,
         completions: list[Completion],
+        sampling: Mapping[str, JsonValue] | None = None,
     ) -> Completion:
         completion = self.provider.complete(
             (
@@ -826,6 +834,7 @@ class Engine:
             temperature=temperature,
             max_tokens=max_tokens,
             json_mode=json_mode and self.config.use_json_mode,
+            sampling=sampling,
         )
         if completion.finish_reason not in _ALLOWED_FINISH_REASONS:
             raise ProviderError(
