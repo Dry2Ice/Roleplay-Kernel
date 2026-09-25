@@ -424,6 +424,19 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(session.state.location, "unspecified")
         self.assertEqual(result.pending_operations.operations[0].impact, "high")
 
+    def test_lite_mode_uses_one_render_request(self) -> None:
+        provider = ScriptedProvider(
+            [Completion("The door opened.", "test-model")]
+        )
+        engine = Engine(provider, config=EngineConfig(mode="lite"))
+        session = engine.new_session()
+
+        result = engine.advance(session, "I open the door")
+
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.text, "The door opened.")
+
     def test_truncated_completion_is_accepted_as_partial_output(self) -> None:
         provider = ScriptedProvider(
             [

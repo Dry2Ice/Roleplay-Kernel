@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     integrationKey: '',
     model: 'roleplay-kernel',
     profileId: '',
+    mode: 'balanced',
     language: 'ru',
     pov: 'third_person_limited',
     tense: 'past',
@@ -332,6 +333,7 @@ function onPromptReady(data) {
         request_key: key,
         transcript,
         generation_type: currentGenerationType,
+        mode: settings.mode,
         language: settings.language,
         pov: settings.pov,
         tense: settings.tense,
@@ -771,6 +773,7 @@ function bindUi() {
     const integrationKey = document.getElementById('rpk_integration_key');
     const model = document.getElementById('rpk_model');
     const profile = document.getElementById('rpk_profile');
+    const mode = document.getElementById('rpk_mode');
     const language = document.getElementById('rpk_language');
     const autoRoute = document.getElementById('rpk_auto_route');
     const launch = document.getElementById('rpk_launch');
@@ -784,6 +787,7 @@ function bindUi() {
     sidecarUrl.value = settings.sidecarUrl;
     integrationKey.value = settings.integrationKey;
     model.value = settings.model;
+    mode.value = settings.mode;
     language.value = settings.language;
     autoRoute.checked = settings.autoRoute;
     refreshProfileOptions();
@@ -812,6 +816,10 @@ function bindUi() {
         settings.profileId = profile.value;
         saveSettings();
         refreshProfileOptions();
+    });
+    mode.addEventListener('change', () => {
+        settings.mode = mode.value;
+        saveSettings();
     });
     language.addEventListener('change', () => {
         settings.language = language.value;

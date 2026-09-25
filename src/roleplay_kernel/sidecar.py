@@ -14,7 +14,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -361,6 +361,7 @@ class GenerationEnvelope:
     pov: str
     tense: str
     operation: str = "generate"
+    mode: EngineMode = "balanced"
     upstream_profile: STProfileConfig | None = None
     sampling: dict[str, JsonValue] = field(default_factory=dict)
 
@@ -375,6 +376,7 @@ class GenerationEnvelope:
             "language": self.language,
             "pov": self.pov,
             "tense": self.tense,
+            "mode": self.mode,
             "sampling": dict(self.sampling),
         }
         if self.upstream_profile is not None:
@@ -419,6 +421,10 @@ class GenerationEnvelope:
         )
         sampling_value = data.get("sampling")
         sampling = _object(sampling_value, "sampling") if sampling_value is not None else {}
+        mode = cast(
+            EngineMode,
+            _choice(data, "mode", "balanced", {"lite", "fast", "balanced", "strict"}),
+        )
         return cls(
             protocol=protocol,
             session_id=session_id,
@@ -434,6 +440,7 @@ class GenerationEnvelope:
             ),
             tense=_choice(data, "tense", "past", {"past", "present", "future"}),
             operation=operation,
+            mode=mode,
             upstream_profile=profile,
             sampling=sampling,
         )
@@ -654,6 +661,10 @@ class SessionService:
             ),
         }
 
+    def _apply_mode(self, mode: EngineMode) -> None:
+        if self.engine.config.mode != mode:
+            self.engine.config = replace(self.engine.config, mode=mode)
+
     def _apply_upstream_profile(self, profile: STProfileConfig | None) -> None:
         if profile is None:
             if self._profile_signature is not None:
@@ -744,6 +755,7 @@ class SessionService:
             self._sync_transcript(record.session, conversation)
             record.checkpoint = record.session.to_dict()
             with self._generation_lock:
+                self._apply_mode(envelope.mode)
                 self._apply_upstream_profile(envelope.upstream_profile)
                 result = self.engine.advance(
                     record.session,
@@ -1572,8 +1584,8 @@ def _array(value: JsonValue | None, name: str) -> list[JsonValue]:
 
 
 def _engine_mode(value: str) -> EngineMode:
-    if value not in {"fast", "balanced", "strict"}:
-        raise ValueError("mode must be fast, balanced, or strict")
+    if value not in {"lite", "fast", "balanced", "strict"}:
+        raise ValueError("mode must be lite, fast, balanced, or strict")
     return cast(EngineMode, value)
 
 
@@ -1665,6 +1677,7 @@ def _request_fingerprint(
     payload = json.dumps(
         [
             envelope.generation_type,
+            envelope.mode,
             transcript,
             context_prompt.strip(),
             profile,

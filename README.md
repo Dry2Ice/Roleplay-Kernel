@@ -40,6 +40,7 @@ python -m roleplay_kernel.sidecar --config .\config.json
 ## Использование
 
 - Кнопка `Запустить runtime` запускает sidecar через ST Server Plugin без отдельного окна/консоли, автоматически подставляет URL и integration key.
+- В настройках Roleplay Kernel выберите режим: `Balanced` (полный pipeline), `Fast` (render + state extraction) или `Lite` (один render-вызов для ограниченных провайдеров).
 - В настройках Roleplay Kernel выберите сохранённый Chat Completion профиль ST в поле `ST connection profile`.
 - Sidecar получает из профиля `source`, URL, model и `secret-id`, затем сам обращается к ST backend через локальный CSRF-сеанс; сырой API key не передаётся и не читается extension.
 - Если профиль не выбран, используется ручной `upstream_*` из `config.json`.

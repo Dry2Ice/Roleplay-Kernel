@@ -33,6 +33,14 @@
                     <small class="rpk-details">Это идентификатор локального протокола. Реальная модель выбирается в профиле ST.</small>
                 </label>
                 <label class="rpk-field">
+                    <span>Режим Kernel</span>
+                    <select id="rpk_mode">
+                        <option value="balanced">Balanced — полный pipeline</option>
+                        <option value="fast">Fast — render + state extraction</option>
+                        <option value="lite">Lite — один render-вызов</option>
+                    </select>
+                </label>
+                <label class="rpk-field">
                     <span>Language</span>
                     <select id="rpk_language">
                         <option value="ru">Русский</option>

@@ -36,7 +36,7 @@ from .validators import (
     validate_candidate,
 )
 
-EngineMode = Literal["fast", "balanced", "strict"]
+EngineMode = Literal["lite", "fast", "balanced", "strict"]
 TurnStatus = Literal["ok", "repaired", "needs_confirmation", "needs_attention"]
 _ALLOWED_FINISH_REASONS = {None, "stop", "end_turn", "eos", "length"}
 
@@ -65,7 +65,7 @@ class EngineConfig:
     repair_temperature: float = 0.3
 
     def __post_init__(self) -> None:
-        if self.mode not in {"fast", "balanced", "strict"}:
+        if self.mode not in {"lite", "fast", "balanced", "strict"}:
             raise ValueError("unsupported engine mode")
         if self.max_repairs < 0:
             raise ValueError("max_repairs cannot be negative")
@@ -639,6 +639,21 @@ class Engine:
             ),
             activations=activations,
         )
+        if self.config.mode == "lite":
+            return (
+                merge_findings(
+                    deterministic,
+                    (
+                        Finding(
+                            severity="warning",
+                            code="lite_mode",
+                            message="Lite mode skipped state extraction and critic",
+                            confidence=1.0,
+                        ),
+                    ),
+                ),
+                DeltaResult(delta=StateDelta(), findings=()),
+            )
         delta_result = self._extract(
             session,
             plan,
@@ -677,7 +692,7 @@ class Engine:
         completions: list[Completion],
         external_context: str,
     ) -> tuple[dict[str, JsonValue], tuple[Finding, ...]]:
-        if self.config.mode == "fast":
+        if self.config.mode in {"lite", "fast"}:
             return fallback_plan(session._state, user_input), ()
         prompt = self.compiler.compile_plan(
             state=session._state,
