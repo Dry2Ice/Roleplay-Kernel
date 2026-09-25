@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+config.json
+state/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+server-plugin/data/
+server-plugin/runtime.json
+server-plugin/runtime/

@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "upstream_base_url": "https://api.openai.com/v1",
+  "upstream_model": "gpt-4o-mini",
+  "upstream_api_key_env": "OPENAI_API_KEY",
+  "upstream_token_parameter": "max_tokens",
+  "integration_key": "replace-with-at-least-32-random-characters",
+  "state_dir": "~/.roleplay-kernel",
+  "mode": "balanced",
+  "context_window": 32768,
+  "token_budget": 18000,
+  "max_output_tokens": 1200,
+  "max_internal_tokens": 1200,
+  "max_repairs": 1,
+  "max_context_chars": 16000,
+  "allow_insecure_http": false
+}

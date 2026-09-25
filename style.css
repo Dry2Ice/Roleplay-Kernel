@@ -1,0 +1,62 @@
+.roleplay-kernel-settings {
+    margin-bottom: 8px;
+}
+
+.roleplay-kernel-settings .rpk-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 8px 0;
+}
+
+.roleplay-kernel-settings .rpk-field input,
+.roleplay-kernel-settings .rpk-field select {
+    flex: 1 1 55%;
+    min-width: 0;
+}
+
+.roleplay-kernel-settings .rpk-grid,
+.roleplay-kernel-settings .rpk-actions,
+.roleplay-kernel-settings .rpk-status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.roleplay-kernel-settings .rpk-grid > .rpk-field {
+    flex: 1 1 45%;
+}
+
+.roleplay-kernel-settings .rpk-actions {
+    margin-top: 8px;
+}
+
+.roleplay-kernel-settings .rpk-status {
+    font-weight: 600;
+}
+
+.roleplay-kernel-settings .rpk-details {
+    opacity: 0.75;
+    margin-bottom: 8px;
+}
+
+.roleplay-kernel-settings .rpk-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0;
+}
+
+@media (max-width: 700px) {
+    .roleplay-kernel-settings .rpk-field {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .roleplay-kernel-settings .rpk-field input,
+    .roleplay-kernel-settings .rpk-field select {
+        width: 100%;
+    }
+}
