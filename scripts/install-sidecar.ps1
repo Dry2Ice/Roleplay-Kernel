@@ -53,9 +53,12 @@ Copy-Item -LiteralPath (Join-Path $ServerPluginSource "index.js") -Destination $
 
 if (-not (Test-Path -LiteralPath $Python)) {
     python -m venv $VirtualEnvironment
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create the Python virtual environment"
+    }
 }
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to create the Python virtual environment"
+if (-not (Test-Path -LiteralPath $Python)) {
+    throw "Python virtual environment is missing $Python"
 }
 & $Python -m pip install --disable-pip-version-check $RepoRoot
 if ($LASTEXITCODE -ne 0) {
