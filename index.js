@@ -1,0 +1,599 @@
+const MODULE_NAME = 'roleplay_kernel';
+const PROTOCOL_VERSION = 1;
+const ENVELOPE_PREFIX = '[ROLEPLAY_KERNEL_ENVELOPE_V1]';
+const CONTROL_PREFIX = '[ROLEPLAY_KERNEL_CONTROL_V1]';
+const CONTROL_MODEL_PREFIX = 'roleplay-kernel-control/';
+const SUPPORTED_GENERATIONS = new Set(['normal', 'regenerate', 'swipe']);
+const DEFAULT_SETTINGS = Object.freeze({
+    enabled: false,
+    autoRoute: true,
+    sidecarUrl: 'http://127.0.0.1:8787/v1',
+    integrationKey: '',
+    model: 'roleplay-kernel',
+    language: 'ru',
+    pov: 'third_person_limited',
+    tense: 'past',
+    previousConnection: null,
+});
+
+let settings = null;
+let currentGenerationType = 'normal';
+let currentGenerationActive = false;
+let uiReady = false;
+const statusRequests = new Map();
+
+function getContext() {
+    return SillyTavern.getContext();
+}
+
+function getExtensionName() {
+    const path = new URL('.', import.meta.url).pathname;
+    return path.split('/').filter(Boolean).at(-1) || 'RoleplayKernel';
+}
+
+function ensureSettings() {
+    const context = getContext();
+    context.extensionSettings[MODULE_NAME] ??= structuredClone(DEFAULT_SETTINGS);
+    const stored = context.extensionSettings[MODULE_NAME];
+    for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+        stored[key] ??= value;
+    }
+    settings = stored;
+    return settings;
+}
+
+function saveSettings() {
+    getContext().saveSettingsDebounced();
+}
+
+function ensureChatBinding() {
+    const context = getContext();
+    if (!context.chatMetadata || typeof context.chatMetadata !== 'object') {
+        return null;
+    }
+    context.chatMetadata[MODULE_NAME] ??= {
+        schemaVersion: 1,
+        sessionId: context.uuidv4(),
+        stateVersion: 0,
+        pendingCount: 0,
+        pendingRequestId: null,
+        status: 'idle',
+        desynchronized: false,
+    };
+    return context.chatMetadata[MODULE_NAME];
+}
+
+function saveChatBinding() {
+    const context = getContext();
+    if (context.chatMetadata?.[MODULE_NAME]) {
+        context.saveMetadataDebounced();
+    }
+}
+
+function validateSidecarUrl(value) {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol)) {
+        throw new Error('Sidecar URL must use HTTP or HTTPS');
+    }
+    if (url.protocol === 'http:') {
+        const host = url.hostname.toLowerCase();
+        if (!['localhost', '127.0.0.1', '[::1]', '::1'].includes(host)) {
+            throw new Error('Plain HTTP is allowed only for localhost');
+        }
+    }
+    if (url.search || url.hash) {
+        throw new Error('Sidecar URL must not contain query or fragment');
+    }
+    const pathname = url.pathname.replace(/\/+$/, '');
+    if (!pathname) {
+        url.pathname = '/v1';
+    } else if (!pathname.endsWith('/v1')) {
+        throw new Error('Sidecar URL must end with /v1');
+    }
+    return url.toString().replace(/\/+$/, '');
+}
+
+function isCustomSource() {
+    const context = getContext();
+    return context.mainApi === 'openai'
+        && context.chatCompletionSettings.chat_completion_source === 'custom';
+}
+
+function shouldRoute() {
+    const context = getContext();
+    return Boolean(
+        settings?.enabled
+        && settings.autoRoute
+        && isCustomSource()
+        && !context.groupId
+        && !context.chatMetadata?.[MODULE_NAME]?.desynchronized
+    );
+}
+
+function transcriptSnapshot() {
+    const context = getContext();
+    const messages = Array.isArray(context.chat) ? context.chat : [];
+    const selected = messages
+        .filter(message => (
+            !message.is_system
+            && !message.extra?.[context.symbols?.ignore]
+            && message.extra?.type !== 'narrator'
+        ))
+        .slice(-200);
+    const reversed = [];
+    const encoder = new TextEncoder();
+    let remainingBytes = 1500000;
+    for (let index = selected.length - 1; index >= 0 && remainingBytes > 0; index -= 1) {
+        const message = selected[index];
+        let content = String(
+            typeof context.substituteParams === 'function'
+                ? context.substituteParams(message.mes || '')
+                : message.mes || '',
+        ).slice(0, 64000);
+        while (content && encoder.encode(content).length > remainingBytes) {
+            content = content.slice(0, -1);
+        }
+        reversed.push({
+            role: message.is_user ? 'user' : 'assistant',
+            name: String(message.name || '').slice(0, 200),
+            content,
+            swipe_id: message.swipe_id == null ? null : String(message.swipe_id).slice(0, 128),
+        });
+        remainingBytes -= encoder.encode(content).length;
+    }
+    return reversed.reverse().map((item, index) => ({ index, ...item }));
+}
+
+function requestKey() {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+}
+
+function integrationHeaders(existing = '') {
+    const authorization = `Bearer ${settings.integrationKey}`;
+    const yaml = SillyTavern.libs?.yaml;
+    if (!yaml?.parse || !yaml?.stringify) {
+        return `Authorization: ${JSON.stringify(authorization)}`;
+    }
+    let parsed;
+    try {
+        parsed = existing ? yaml.parse(String(existing)) : {};
+    } catch {
+        return `Authorization: ${JSON.stringify(authorization)}`;
+    }
+    if (Array.isArray(parsed)) {
+        const entries = parsed.filter(item => item && typeof item === 'object');
+        const withoutAuthorization = entries.filter(item => !Object.keys(item).some(key => /^authorization$/i.test(key)));
+        withoutAuthorization.push({ Authorization: authorization });
+        return yaml.stringify(withoutAuthorization);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return `Authorization: ${JSON.stringify(authorization)}`;
+    }
+    const headers = {};
+    for (const [key, value] of Object.entries(parsed)) {
+        if (!/^authorization$/i.test(key)) {
+            headers[key] = value;
+        }
+    }
+    headers.Authorization = authorization;
+    return yaml.stringify(headers);
+}
+
+function hasKernelEnvelope(messages) {
+    return Array.isArray(messages)
+        && messages.some(message => (
+            typeof message?.content === 'string'
+            && message.content.includes(ENVELOPE_PREFIX)
+        ));
+}
+
+function onPromptReady(data) {
+    if (
+        !shouldRoute()
+        || data?.dryRun
+        || !currentGenerationActive
+        || !SUPPORTED_GENERATIONS.has(currentGenerationType)
+    ) {
+        return;
+    }
+    const binding = ensureChatBinding();
+    if (!binding) {
+        return;
+    }
+    const transcript = transcriptSnapshot();
+    const key = requestKey();
+    const envelope = {
+        protocol: PROTOCOL_VERSION,
+        operation: 'generate',
+        session_id: binding.sessionId,
+        request_key: key,
+        transcript,
+        generation_type: currentGenerationType,
+        language: settings.language,
+        pov: settings.pov,
+        tense: settings.tense,
+    };
+    if (!Array.isArray(data.chat)) {
+        return;
+    }
+    data.chat.push({
+        role: 'system',
+        content: ENVELOPE_PREFIX + JSON.stringify(envelope),
+    });
+}
+
+function onSettingsReady(request) {
+    const type = String(request.type || currentGenerationType);
+    if (
+        !shouldRoute()
+        || request.chat_completion_source !== 'custom'
+        || !SUPPORTED_GENERATIONS.has(type)
+        || !hasKernelEnvelope(request.messages)
+    ) {
+        return;
+    }
+    try {
+        request.custom_url = validateSidecarUrl(settings.sidecarUrl);
+        request.model = DEFAULT_SETTINGS.model;
+        request.custom_include_body = '';
+        request.custom_exclude_body = '';
+        request.custom_include_headers = integrationHeaders(request.custom_include_headers);
+        request.custom_prompt_post_processing = '';
+    } catch (error) {
+        request.custom_url = 'http://127.0.0.1:1/v1';
+        toastr.error(`Roleplay Kernel: ${String(error.message || error)}`);
+    }
+}
+
+async function controlTunnel(action, payload = {}) {
+    const context = getContext();
+    const body = {
+        chat_completion_source: 'custom',
+        custom_url: validateSidecarUrl(settings.sidecarUrl),
+        model: `${CONTROL_MODEL_PREFIX}${action}`,
+        type: 'quiet',
+        reverse_proxy: '',
+        messages: [{
+            role: 'system',
+            content: CONTROL_PREFIX + JSON.stringify(payload),
+        }],
+        temperature: 0,
+        max_tokens: 4096,
+        stream: false,
+        custom_include_body: '',
+        custom_exclude_body: '',
+        custom_include_headers: integrationHeaders(),
+        custom_prompt_post_processing: '',
+    };
+    const response = await fetch('/api/backends/chat-completions/generate', {
+        method: 'POST',
+        headers: context.getRequestHeaders(),
+        body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data?.error) {
+        throw new Error(data?.error?.message || `Sidecar request failed: ${response.status}`);
+    }
+    const content = data?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string') {
+        throw new Error('Sidecar returned an invalid control response');
+    }
+    return JSON.parse(content);
+}
+
+function renderStatus(status) {
+    const state = document.getElementById('rpk_status');
+    const version = document.getElementById('rpk_version');
+    const details = document.getElementById('rpk_details');
+    const approve = document.getElementById('rpk_approve');
+    const reject = document.getElementById('rpk_reject');
+    if (!state || !version || !details || !approve || !reject) {
+        return;
+    }
+    if (!status) {
+        state.textContent = 'Не подключено';
+        version.textContent = '';
+        details.textContent = '';
+        approve.disabled = true;
+        reject.disabled = true;
+        return;
+    }
+    state.textContent = status.exists ? 'Подключено' : 'Сессия ещё не создана';
+    version.textContent = `v${status.version || '—'} · state ${status.state_version || 0}`;
+    const findings = Array.isArray(status.findings) ? status.findings : [];
+    const hard = findings.filter(item => item?.severity === 'hard').length;
+    details.textContent = [
+        status.transcript_matches === false ? 'Транскрипт рассинхронизирован' : null,
+        `Режим: ${status.status || 'idle'}`,
+        `Модулей: ${Array.isArray(status.active_modules) ? status.active_modules.length : 0}`,
+        `Ошибок critic: ${hard}`,
+        `Pending: ${status.pending_count || 0}`,
+    ].filter(Boolean).join(' · ');
+    approve.disabled = !status.pending_request_id;
+    reject.disabled = !status.pending_request_id;
+}
+
+async function refreshStatus({ silent = false } = {}) {
+    const binding = ensureChatBinding();
+    if (!binding) {
+        return null;
+    }
+    const sessionId = binding.sessionId;
+    const existing = statusRequests.get(sessionId);
+    if (existing) {
+        return existing;
+    }
+    const request = (async () => {
+        try {
+            const status = await controlTunnel('status', {
+                session_id: sessionId,
+                transcript: transcriptSnapshot(),
+            });
+            const current = ensureChatBinding();
+            if (!current || current.sessionId !== sessionId) {
+                return null;
+            }
+            current.stateVersion = status.state_version || 0;
+            current.pendingCount = status.pending_count || 0;
+            current.pendingRequestId = status.pending_request_id || null;
+            current.status = status.status || 'idle';
+            if (status.transcript_matches === true) {
+                current.desynchronized = false;
+            }
+            saveChatBinding();
+            renderStatus(status);
+            if (!silent) {
+                toastr.success('Roleplay Kernel подключён');
+            }
+            return status;
+        } catch (error) {
+            const current = ensureChatBinding();
+            if (!current || current.sessionId !== sessionId) {
+                return null;
+            }
+            current.status = 'offline';
+            saveChatBinding();
+            renderStatus(null);
+            if (!silent) {
+                toastr.error(String(error.message || error));
+            }
+            return null;
+        } finally {
+            statusRequests.delete(sessionId);
+        }
+    })();
+    statusRequests.set(sessionId, request);
+    return request;
+}
+
+function restorePreviousConnection() {
+    const previous = settings.previousConnection;
+    if (!previous) {
+        return;
+    }
+    const completion = getContext().chatCompletionSettings;
+    completion.chat_completion_source = previous.source;
+    completion.custom_url = previous.url;
+    completion.custom_model = previous.model;
+    completion.custom_prompt_post_processing = previous.postProcessing;
+}
+
+async function activateRouting() {
+    const previous = {
+        source: getContext().chatCompletionSettings.chat_completion_source,
+        url: getContext().chatCompletionSettings.custom_url,
+        model: getContext().chatCompletionSettings.custom_model,
+        postProcessing: getContext().chatCompletionSettings.custom_prompt_post_processing,
+    };
+    try {
+        ensureSettings();
+        const context = getContext();
+        if (context.mainApi !== 'openai') {
+            throw new Error('Сначала выберите Chat Completion API');
+        }
+        if (
+            !settings.integrationKey
+            || settings.integrationKey.length < 32
+            || /[^\u0021-\u007e]/.test(settings.integrationKey)
+        ) {
+            throw new Error('Укажите корректный integration key длиной не менее 32 символов');
+        }
+        await controlTunnel('health');
+        settings.previousConnection ??= previous;
+        context.chatCompletionSettings.chat_completion_source = 'custom';
+        context.chatCompletionSettings.custom_url = validateSidecarUrl(settings.sidecarUrl);
+        context.chatCompletionSettings.custom_model = DEFAULT_SETTINGS.model;
+        context.chatCompletionSettings.custom_prompt_post_processing = '';
+        settings.enabled = true;
+        settings.autoRoute = true;
+        saveSettings();
+        const status = await refreshStatus();
+        if (!status) {
+            throw new Error('Sidecar не ответил');
+        }
+        toastr.success('Roleplay Kernel активирован для Custom OpenAI source');
+    } catch (error) {
+        settings.enabled = false;
+        restorePreviousConnection();
+        saveSettings();
+        toastr.error(String(error.message || error));
+    }
+}
+
+function disableRouting() {
+    settings.enabled = false;
+    restorePreviousConnection();
+    saveSettings();
+    renderStatus(null);
+    toastr.info('Roleplay Kernel routing отключён');
+}
+
+async function runControl(action) {
+    const binding = ensureChatBinding();
+    if (!binding) {
+        return;
+    }
+    if (action === 'reset') {
+        const confirmed = await contextPopupConfirm(
+            'Сбросить состояние Roleplay Kernel?',
+            'История SillyTavern сохранится, но каноническое состояние ядра будет удалено.',
+        );
+        if (!confirmed) {
+            return;
+        }
+    }
+    const sessionId = binding.sessionId;
+    try {
+        const status = await controlTunnel(action, { session_id: sessionId });
+        const current = ensureChatBinding();
+        if (!current || current.sessionId !== sessionId) {
+            return;
+        }
+        current.stateVersion = status.state_version || 0;
+        current.pendingCount = status.pending_count || 0;
+        current.pendingRequestId = status.pending_request_id || null;
+        current.status = status.status || (action === 'reset' ? 'idle' : current.status);
+        if (action === 'reset') {
+            current.desynchronized = false;
+        } else if (status.transcript_matches === true) {
+            current.desynchronized = false;
+        }
+        saveChatBinding();
+        renderStatus(status);
+        toastr.success('Состояние обновлено');
+    } catch (error) {
+        toastr.error(String(error.message || error));
+    }
+}
+
+async function contextPopupConfirm(title, message) {
+    const context = getContext();
+    return context.Popup.show.confirm(title, message);
+}
+
+function bindUi() {
+    if (uiReady) {
+        return;
+    }
+    uiReady = true;
+    const sidecarUrl = document.getElementById('rpk_sidecar_url');
+    const integrationKey = document.getElementById('rpk_integration_key');
+    const model = document.getElementById('rpk_model');
+    const language = document.getElementById('rpk_language');
+    const autoRoute = document.getElementById('rpk_auto_route');
+    const activate = document.getElementById('rpk_activate');
+    const disable = document.getElementById('rpk_disable');
+    const refresh = document.getElementById('rpk_refresh');
+    const approve = document.getElementById('rpk_approve');
+    const reject = document.getElementById('rpk_reject');
+    const reset = document.getElementById('rpk_reset');
+    sidecarUrl.value = settings.sidecarUrl;
+    integrationKey.value = settings.integrationKey;
+    model.value = settings.model;
+    language.value = settings.language;
+    autoRoute.checked = settings.autoRoute;
+    sidecarUrl.addEventListener('change', () => {
+        try {
+            settings.sidecarUrl = validateSidecarUrl(sidecarUrl.value);
+            sidecarUrl.value = settings.sidecarUrl;
+            saveSettings();
+        } catch (error) {
+            toastr.error(String(error.message || error));
+        }
+    });
+    integrationKey.addEventListener('change', () => {
+        settings.integrationKey = integrationKey.value;
+        saveSettings();
+    });
+    model.addEventListener('change', () => {
+        settings.model = model.value.trim() || DEFAULT_SETTINGS.model;
+        model.value = settings.model;
+        saveSettings();
+    });
+    language.addEventListener('change', () => {
+        settings.language = language.value;
+        saveSettings();
+    });
+    autoRoute.addEventListener('change', () => {
+        settings.autoRoute = autoRoute.checked;
+        saveSettings();
+    });
+    activate.addEventListener('click', () => void activateRouting());
+    disable.addEventListener('click', disableRouting);
+    refresh.addEventListener('click', () => void refreshStatus());
+    approve.addEventListener('click', () => void runControl('commit'));
+    reject.addEventListener('click', () => void runControl('reject'));
+    reset.addEventListener('click', () => void runControl('reset'));
+    renderStatus(null);
+    void refreshStatus({ silent: true });
+}
+
+async function renderUi() {
+    if (uiReady || !document.getElementById('extensions_settings2')) {
+        return;
+    }
+    const extensionName = getExtensionName();
+    const html = await getContext().renderExtensionTemplateAsync(
+        `third-party/${extensionName}`,
+        'settings',
+    );
+    document.getElementById('extensions_settings2').insertAdjacentHTML('beforeend', html);
+    bindUi();
+}
+
+function registerEvents() {
+    const context = getContext();
+    context.eventSource.on(context.eventTypes.GENERATION_STARTED, (type, _params, dryRun) => {
+        if (dryRun) {
+            return;
+        }
+        currentGenerationType = String(type || 'normal');
+        currentGenerationActive = true;
+    });
+    context.eventSource.on(context.eventTypes.GENERATION_ENDED, () => {
+        currentGenerationActive = false;
+        currentGenerationType = 'normal';
+        void refreshStatus({ silent: true });
+    });
+    context.eventSource.on(context.eventTypes.CHAT_COMPLETION_PROMPT_READY, onPromptReady);
+    context.eventSource.on(context.eventTypes.CHAT_COMPLETION_SETTINGS_READY, onSettingsReady);
+    context.eventSource.on(context.eventTypes.CHAT_CHANGED, () => {
+        ensureChatBinding();
+        renderStatus(null);
+        void refreshStatus({ silent: true });
+    });
+    context.eventSource.on(context.eventTypes.MESSAGE_RECEIVED, () => {
+        void refreshStatus({ silent: true });
+    });
+    const markDesynchronized = () => {
+        const binding = ensureChatBinding();
+        if (binding) {
+            binding.desynchronized = true;
+            saveChatBinding();
+        }
+    };
+    context.eventSource.on(context.eventTypes.MESSAGE_EDITED, markDesynchronized);
+    context.eventSource.on(context.eventTypes.MESSAGE_DELETED, markDesynchronized);
+    context.eventSource.on(context.eventTypes.MESSAGE_SWIPED, markDesynchronized);
+}
+
+export function onActivate() {
+    ensureSettings();
+    registerEvents();
+    const context = getContext();
+    context.eventSource.on(context.eventTypes.APP_READY, () => {
+        void renderUi();
+    });
+}
+
+export function onInstall() {
+    ensureSettings();
+    saveSettings();
+}
+
+export function onUpdate() {
+    ensureSettings();
+    saveSettings();
+}

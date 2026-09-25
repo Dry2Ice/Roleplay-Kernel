@@ -1,0 +1,614 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from collections.abc import Sequence
+from pathlib import Path
+from typing import cast
+
+from roleplay_kernel import Completion
+from roleplay_kernel.models import ChatMessage, JsonValue
+from roleplay_kernel.sidecar import (
+    CONTROL_PREFIX,
+    ENVELOPE_PREFIX,
+    PROTOCOL_VERSION,
+    GenerationEnvelope,
+    IncomingMessage,
+    SessionService,
+    SidecarConfig,
+    SidecarError,
+    TranscriptItem,
+    create_server,
+)
+
+TEST_INTEGRATION_KEY = "integration-key-for-tests-32chars-long"
+
+
+class ScriptedProvider:
+    def __init__(self, responses: list[Completion]) -> None:
+        self.responses = list(responses)
+        self.calls: list[tuple[ChatMessage, ...]] = []
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> Completion:
+        self.calls.append(tuple(messages))
+        if not self.responses:
+            raise AssertionError("unexpected provider call")
+        return self.responses.pop(0)
+
+
+class SidecarTests(unittest.TestCase):
+    def test_generation_persists_pending_commit_and_restores_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = _config(Path(temporary))
+            provider = _pending_provider()
+            service = SessionService(config, provider=provider)
+            messages = _messages(session_id="chat_one", user_text="Я вхожу в комнату")
+
+            turn = service.generate(
+                _envelope("chat_one", "Я вхожу в комнату"),
+                messages,
+                "Character: Aria",
+            )
+
+            self.assertEqual(turn.status, "needs_confirmation")
+            self.assertIsNotNone(turn.pending_request_id)
+            self.assertIn("EXTERNAL_CONTEXT_DATA", provider.calls[0][1].content)
+            status = service.control("status", {"session_id": "chat_one"})
+            self.assertEqual(status["pending_count"], 1)
+
+            committed = service.control("commit", {"session_id": "chat_one"})
+
+            self.assertEqual(committed["pending_request_id"], None)
+            self.assertEqual(committed["state_version"], 1)
+            repeated_commit = service.control("commit", {"session_id": "chat_one"})
+            self.assertEqual(repeated_commit["pending_request_id"], None)
+            state = service.control("state", {"session_id": "chat_one"})
+            state_data = state["state"]
+            self.assertIsInstance(state_data, dict)
+            if not isinstance(state_data, dict):
+                self.fail("state must be an object")
+            injuries = state_data["injuries"]
+            self.assertIsInstance(injuries, dict)
+            if not isinstance(injuries, dict):
+                self.fail("injuries must be an object")
+            self.assertEqual(injuries["player.knee"], "горящая рана")
+
+            resumed = SessionService(config, provider=ScriptedProvider([]))
+            restored = resumed.control("status", {"session_id": "chat_one"})
+
+            self.assertTrue(restored["exists"])
+            self.assertEqual(restored["pending_count"], 0)
+            self.assertEqual(restored["state_version"], 1)
+
+    def test_pending_delta_survives_sidecar_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = _config(Path(temporary))
+            first_service = SessionService(config, provider=_pending_provider())
+            self.assertEqual(len((Path(temporary) / "integrity.key").read_bytes()), 32)
+            first_service.generate(
+                _envelope("chat_restart", "Я вхожу в комнату"),
+                _messages("chat_restart", "Я вхожу в комнату"),
+                "Character: Aria",
+            )
+
+            resumed = SessionService(config, provider=ScriptedProvider([]))
+            status = resumed.control("status", {"session_id": "chat_restart"})
+            self.assertEqual(status["pending_count"], 1)
+            committed = resumed.control("commit", {"session_id": "chat_restart"})
+
+            self.assertEqual(committed["pending_request_id"], None)
+            self.assertEqual(committed["state_version"], 1)
+
+    def test_pending_delta_can_be_rejected_before_next_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = _config(Path(temporary))
+            provider = _pending_provider()
+            provider.responses.extend(_empty_turn_responses())
+            service = SessionService(config, provider=provider)
+
+            service.generate(
+                _envelope("chat_two", "Я вхожу в комнату"),
+                _messages("chat_two", "Я вхожу в комнату"),
+                "Character: Aria",
+            )
+            rejected = service.control("reject", {"session_id": "chat_two"})
+
+            self.assertEqual(rejected["pending_request_id"], None)
+            state = service.control("state", {"session_id": "chat_two"})
+            state_data = state["state"]
+            self.assertIsInstance(state_data, dict)
+            if not isinstance(state_data, dict):
+                self.fail("state must be an object")
+            self.assertEqual(state_data["injuries"], {})
+
+            next_messages = _messages(
+                "chat_two",
+                "Я продолжаю идти",
+                include_previous=True,
+            )
+            next_turn = service.generate(
+                _envelope(
+                    "chat_two",
+                    "Я продолжаю идти",
+                    include_previous=True,
+                    include_rejected_previous=True,
+                ),
+                next_messages,
+                "Character: Aria",
+            )
+
+            self.assertEqual(next_turn.pending_request_id, None)
+            self.assertEqual(next_turn.status, "ok")
+
+    def test_pending_delta_blocks_next_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=_pending_provider(),
+            )
+            service.generate(
+                _envelope("chat_three", "Я вхожу в комнату"),
+                _messages("chat_three", "Я вхожу в комнату"),
+                "Character: Aria",
+            )
+
+            with self.assertRaisesRegex(SidecarError, "approved or rejected"):
+                service.generate(
+                    _envelope("chat_three", "Я продолжаю идти", include_previous=True),
+                    _messages(
+                        "chat_three",
+                        "Я продолжаю идти",
+                        include_previous=True,
+                    ),
+                    "Character: Aria",
+                )
+
+    def test_status_detects_transcript_drift_and_ignores_post_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=ScriptedProvider(_empty_turn_responses()),
+            )
+            service.generate(
+                _envelope("chat_status", "Я вхожу в комнату"),
+                _messages("chat_status", "Я вхожу в комнату"),
+                "Character: Aria",
+            )
+            transcript = [
+                {"index": 0, "role": "assistant", "content": "Добро пожаловать."},
+                {"index": 1, "role": "user", "content": "Я вхожу в комнату"},
+                {"index": 2, "role": "assistant", "content": "**Вокруг** была пустая станция."},
+            ]
+            status = service.control(
+                "status",
+                {"session_id": "chat_status", "transcript": cast(JsonValue, transcript)},
+            )
+            self.assertTrue(status["transcript_matches"])
+
+            transcript[1]["content"] = "Другая реплика"
+            drifted = service.control(
+                "status",
+                {"session_id": "chat_status", "transcript": cast(JsonValue, transcript)},
+            )
+            self.assertFalse(drifted["transcript_matches"])
+
+    def test_normal_request_is_idempotent_while_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = _pending_provider()
+            service = SessionService(_config(Path(temporary)), provider=provider)
+            envelope = _envelope("chat_retry", "Я вхожу в комнату")
+
+            first = service.generate(
+                envelope,
+                _messages("chat_retry", "Я вхожу в комнату"),
+                "Character: Aria",
+            )
+            call_count = len(provider.calls)
+            second = service.generate(
+                envelope,
+                _messages("chat_retry", "Другой raw prompt"),
+                "Character: Aria",
+            )
+
+            self.assertEqual(second.text, first.text)
+            self.assertEqual(second.pending_request_id, first.pending_request_id)
+            self.assertEqual(len(provider.calls), call_count)
+            recovered = service.generate(
+                _envelope("chat_retry", "Я вхожу в комнату"),
+                _messages("chat_retry", "Я вхожу в комнату"),
+                "Character: Aria",
+            )
+            self.assertEqual(recovered.text, first.text)
+            self.assertEqual(len(provider.calls), call_count)
+            with self.assertRaisesRegex(SidecarError, "different prompt"):
+                service.generate(
+                    _envelope(
+                        "chat_retry",
+                        "Другой user input",
+                        request_key=envelope.request_key,
+                    ),
+                    _messages("chat_retry", "Другой user input"),
+                    "Character: Aria",
+                )
+
+    def test_regenerate_rewinds_pending_branch_before_next_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = _pending_provider()
+            provider.responses.extend(_empty_turn_responses())
+            service = SessionService(_config(Path(temporary)), provider=provider)
+            service.generate(
+                _envelope("chat_regenerate", "Первый вариант"),
+                _messages("chat_regenerate", "Первый вариант"),
+                "Character: Aria",
+            )
+
+            turn = service.generate(
+                _envelope(
+                    "chat_regenerate",
+                    "Первый вариант",
+                    generation_type="regenerate",
+                ),
+                _messages("chat_regenerate", "Другой raw prompt"),
+                "Character: Aria",
+            )
+
+            self.assertEqual(turn.pending_request_id, None)
+            self.assertEqual(turn.status, "ok")
+
+    def test_openai_endpoint_supports_auth_and_control_tunnel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = _config(Path(temporary), integration_key=TEST_INTEGRATION_KEY)
+            provider = _pending_provider()
+            service = SessionService(config, provider=provider)
+            server = create_server(config, service)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host_value, port_value = server.server_address[:2]
+            host = host_value.decode("utf-8") if isinstance(host_value, bytes) else host_value
+            port = int(port_value)
+            base_url = f"http://{host}:{port}"
+            try:
+                with urllib.request.urlopen(f"{base_url}/health", timeout=2) as response:
+                    health = json.loads(response.read())
+                self.assertEqual(health["status"], "ok")
+
+                unauthorized = urllib.request.Request(
+                    f"{base_url}/v1/chat/completions",
+                    data=b"{}",
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as context:
+                    urllib.request.urlopen(unauthorized, timeout=2)
+                self.assertEqual(context.exception.code, 401)
+                context.exception.close()
+
+                generation_messages: list[JsonValue] = [
+                    {"role": "system", "content": "Character: Aria"}
+                ]
+                generation_messages.extend(
+                    cast(JsonValue, item)
+                    for item in _message_dicts(
+                        _messages("chat_four", "Я вхожу в комнату")[1:]
+                    )
+                )
+                generation = _request(
+                    f"{base_url}/v1/chat/completions",
+                    TEST_INTEGRATION_KEY,
+                    {
+                        "model": "roleplay-kernel",
+                        "messages": generation_messages,
+                        "stream": False,
+                    },
+                )
+                self.assertEqual(_completion_content(generation), "Колено горело.")
+
+                control = _request(
+                    f"{base_url}/v1/chat/completions",
+                    TEST_INTEGRATION_KEY,
+                    {
+                        "model": "roleplay-kernel-control/status",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": CONTROL_PREFIX
+                                + json.dumps({"session_id": "chat_four"}),
+                            }
+                        ],
+                        "stream": False,
+                    },
+                )
+                control_data = json.loads(_completion_content(control))
+                self.assertEqual(control_data["pending_count"], 1)
+
+                provider.responses.extend(_empty_turn_responses())
+                stream_messages = _message_dicts(
+                    _messages("chat_stream", "Я осматриваюсь")
+                )
+                stream_body = _request_text(
+                    f"{base_url}/v1/chat/completions",
+                    TEST_INTEGRATION_KEY,
+                    {
+                        "model": "roleplay-kernel",
+                        "messages": cast(JsonValue, stream_messages),
+                        "stream": True,
+                    },
+                )
+                self.assertIn("data: [DONE]", stream_body)
+                self.assertIn("Вокруг была пустая станция", stream_body)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_raw_final_messages_do_not_override_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = _pending_provider()
+            provider.responses.extend(_empty_turn_responses())
+            service = SessionService(_config(Path(temporary)), provider=provider)
+            service.generate(
+                _envelope("chat_five", "Я вхожу в комнату"),
+                _messages("chat_five", "Я вхожу в комнату"),
+                "Character: Aria",
+            )
+            service.control("reject", {"session_id": "chat_five"})
+
+            raw_messages = _messages(
+                "chat_five",
+                "Новый ход",
+                include_previous=True,
+            )
+            raw_messages[-1] = IncomingMessage("user", "Подмененный сырой prompt")
+
+            turn = service.generate(
+                _envelope("chat_five", "Новый ход", include_previous=True),
+                raw_messages,
+                "Character: Aria",
+            )
+
+            self.assertEqual(turn.status, "ok")
+            rendered_prompts = [
+                message.content
+                for call in provider.calls
+                for message in call
+            ]
+            self.assertTrue(any("Новый ход" in prompt for prompt in rendered_prompts))
+            self.assertFalse(any("Подмененный" in prompt for prompt in rendered_prompts))
+
+
+def _config(root: Path, *, integration_key: str = TEST_INTEGRATION_KEY) -> SidecarConfig:
+    return SidecarConfig(
+        host="127.0.0.1",
+        port=0,
+        upstream_base_url="https://api.example.test/v1",
+        upstream_model="test-model",
+        upstream_api_key_env="TEST_API_KEY",
+        upstream_token_parameter="max_tokens",
+        integration_key=integration_key,
+        state_dir=root,
+        mode="balanced",
+        context_window=32768,
+        token_budget=18000,
+        max_output_tokens=1200,
+        max_internal_tokens=1200,
+        max_repairs=1,
+        max_context_chars=16000,
+        allow_insecure_http=False,
+    )
+
+
+_request_counter = 0
+
+
+def _new_request_key() -> str:
+    global _request_counter
+    _request_counter += 1
+    return f"{_request_counter:016x}"
+
+
+def _envelope(
+    session_id: str,
+    user_text: str = "Я вхожу в помещение.",
+    *,
+    include_previous: bool = False,
+    include_rejected_previous: bool = False,
+    generation_type: str = "normal",
+    request_key: str | None = None,
+) -> GenerationEnvelope:
+    transcript: list[TranscriptItem] = []
+    if include_previous:
+        transcript.extend(
+            (
+                TranscriptItem(0, "user", "Я вхожу в комнату"),
+                TranscriptItem(1, "assistant", "Колено горело."),
+            )
+        )
+        if include_rejected_previous:
+            transcript.extend(
+                (
+                    TranscriptItem(2, "user", "Я осматриваюсь"),
+                    TranscriptItem(3, "assistant", "Колено горело."),
+                )
+            )
+    transcript.append(TranscriptItem(len(transcript), "user", user_text))
+    return GenerationEnvelope(
+        protocol=PROTOCOL_VERSION,
+        session_id=session_id,
+        generation_type=generation_type,
+        request_key=request_key or _new_request_key(),
+        language="ru",
+        pov="third_person_limited",
+        tense="past",
+        transcript=tuple(transcript),
+    )
+
+
+def _messages(
+    session_id: str,
+    user_text: str,
+    *,
+    include_previous: bool = False,
+) -> list[IncomingMessage]:
+    envelope = _envelope(session_id, user_text, include_previous=include_previous)
+    envelope_data = envelope.to_dict()
+    envelope_data["operation"] = "generate"
+    messages = [IncomingMessage("system", "Character: Aria. Setting: an abandoned station.")]
+    if include_previous:
+        messages.extend(
+            (
+                IncomingMessage("user", "Первый ход"),
+                IncomingMessage("assistant", "Колено горело."),
+            )
+        )
+    messages.extend(
+        (
+            IncomingMessage(
+                "system",
+                ENVELOPE_PREFIX + json.dumps(envelope_data),
+            ),
+            IncomingMessage("user", user_text),
+        )
+    )
+    return messages
+
+
+def _message_dicts(messages: list[IncomingMessage]) -> list[dict[str, str]]:
+    return [{"role": message.role, "content": message.content} for message in messages]
+
+
+def _pending_provider() -> ScriptedProvider:
+    return ScriptedProvider(
+        [
+            Completion(_plan_json(), "test-model"),
+            Completion("Колено горело.", "test-model"),
+            Completion(_pending_delta_json(), "test-model"),
+            Completion('{"findings": []}', "test-model"),
+        ]
+    )
+
+
+def _empty_turn_responses() -> list[Completion]:
+    return [
+        Completion(_plan_json(), "test-model"),
+        Completion("Вокруг была пустая станция.", "test-model"),
+        Completion('{"operations": []}', "test-model"),
+        Completion('{"findings": []}', "test-model"),
+    ]
+
+
+def _request(
+    url: str,
+    integration_key: str,
+    payload: dict[str, JsonValue],
+) -> dict[str, JsonValue]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {integration_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=2) as response:
+        value = json.loads(response.read())
+    if not isinstance(value, dict):
+        raise AssertionError("response must be an object")
+    return cast(dict[str, JsonValue], value)
+
+
+def _request_text(
+    url: str,
+    integration_key: str,
+    payload: dict[str, JsonValue],
+) -> str:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {integration_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=2) as response:
+        raw = response.read()
+    if not isinstance(raw, bytes):
+        raise AssertionError("response body must be bytes")
+    return raw.decode("utf-8")
+
+
+def _completion_content(response: dict[str, JsonValue]) -> str:
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise AssertionError("completion choices are missing")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise AssertionError("completion choice must be an object")
+    message = first.get("message")
+    if not isinstance(message, dict):
+        raise AssertionError("completion message must be an object")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise AssertionError("completion content must be a string")
+    return content
+
+
+def _plan_json() -> str:
+    return json.dumps(
+        {
+            "goal": "Ответить на ход игрока",
+            "pov": "third_person_limited",
+            "must_fact_ids": [],
+            "must_events": [],
+            "information_release": [],
+            "allowed_inventions": [],
+            "beats": [
+                {
+                    "action": "Игрок входит",
+                    "reaction": "Колено горит",
+                    "causality": "Предыдущая травма",
+                    "sensory_focus": "Боль",
+                    "state_effect": "Травма подтверждается",
+                }
+            ],
+            "prohibited_moves": [],
+            "style_mode": "restrained",
+            "novelty_requirement": "concrete",
+            "target_state_change": ["injury"],
+            "uncertainty": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def _pending_delta_json() -> str:
+    return json.dumps(
+        {
+            "operations": [
+                {
+                    "kind": "set_injury",
+                    "target": "player.knee",
+                    "value": "горящая рана",
+                    "impact": "high",
+                    "evidence": "Колено горело.",
+                    "certainty": 1.0,
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+if __name__ == "__main__":
+    unittest.main()

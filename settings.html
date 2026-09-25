@@ -1,0 +1,50 @@
+<div class="roleplay-kernel-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Roleplay Kernel</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="rpk-status-row">
+                <span id="rpk_status" class="rpk-status">Не подключено</span>
+                <small id="rpk_version"></small>
+            </div>
+            <div id="rpk_details" class="rpk-details"></div>
+            <label class="rpk-field">
+                <span>Sidecar URL</span>
+                <input id="rpk_sidecar_url" type="text" autocomplete="off" />
+            </label>
+            <label class="rpk-field">
+                <span>Integration key</span>
+                <input id="rpk_integration_key" type="password" autocomplete="new-password" />
+            </label>
+            <div class="rpk-grid">
+                <label class="rpk-field">
+                    <span>Model ID</span>
+                    <input id="rpk_model" type="text" autocomplete="off" />
+                </label>
+                <label class="rpk-field">
+                    <span>Language</span>
+                    <select id="rpk_language">
+                        <option value="ru">Русский</option>
+                        <option value="en">English</option>
+                    </select>
+                </label>
+            </div>
+            <label class="rpk-checkbox">
+                <input id="rpk_auto_route" type="checkbox" />
+                <span>Автоматически маршрутизировать Custom OpenAI source</span>
+            </label>
+            <div class="rpk-actions">
+                <button id="rpk_activate" class="menu-button primary"><i class="fa-solid fa-plug"></i><span>Активировать</span></button>
+                <button id="rpk_disable" class="menu-button"><i class="fa-solid fa-power-off"></i><span>Отключить</span></button>
+                <button id="rpk_refresh" class="menu-button"><i class="fa-solid fa-rotate"></i><span>Обновить</span></button>
+            </div>
+            <div class="rpk-actions">
+                <button id="rpk_approve" class="menu-button" disabled><i class="fa-solid fa-check"></i><span>Подтвердить delta</span></button>
+                <button id="rpk_reject" class="menu-button" disabled><i class="fa-solid fa-xmark"></i><span>Отклонить delta</span></button>
+                <button id="rpk_reset" class="menu-button danger"><i class="fa-solid fa-trash"></i><span>Сбросить сессию</span></button>
+            </div>
+        </div>
+    </div>
+</div>
