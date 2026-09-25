@@ -22,7 +22,7 @@ TokenParameter = Literal["max_tokens", "max_completion_tokens"]
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_ERROR_RESPONSE_BYTES = 65_536
 _PROTECTED_BODY_KEYS = frozenset({"model", "messages", "stream", "response_format"})
-_ALLOWED_FINISH_REASONS = frozenset({"stop", "end_turn", "eos"})
+_ALLOWED_FINISH_REASONS = frozenset({"stop", "end_turn", "eos", "length"})
 _ALLOWED_SAMPLING_KEYS = frozenset(
     {
         "temperature",

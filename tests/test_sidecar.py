@@ -6,7 +6,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -42,6 +42,7 @@ class ScriptedProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
     ) -> Completion:
         self.calls.append(tuple(messages))
         if not self.responses:

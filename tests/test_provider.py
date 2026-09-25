@@ -122,6 +122,13 @@ class ProviderRequestTests(unittest.TestCase):
         self.assertEqual(payload["frequency_penalty"], 0.2)
         self.assertIs(payload["stream"], False)
 
+    def test_length_finish_reason_is_accepted(self) -> None:
+        provider = OpenAICompatibleProvider(model="test", base_url="https://api.example.test/v1")
+        opener = FakeOpener(FakeResponse(_response(finish_reason="length")))
+        with patch("urllib.request.build_opener", return_value=opener):
+            result = provider.complete((ChatMessage(role="user", content="hello"),))
+        self.assertEqual(result.finish_reason, "length")
+
     def test_successful_response_read_is_bounded(self) -> None:
         response = FakeResponse(b"x" * (MAX_RESPONSE_BYTES + 1))
         opener = FakeOpener(response)
@@ -296,7 +303,7 @@ class ProviderValidationTests(unittest.TestCase):
 
     def test_finish_reasons_are_allowlisted(self) -> None:
         provider = OpenAICompatibleProvider(model="test", base_url="https://api.example.test/v1")
-        for finish_reason in ("length", "content_filter", "error", "tool_calls", 7):
+        for finish_reason in ("content_filter", "error", "tool_calls", 7):
             with self.subTest(finish_reason=finish_reason):
                 opener = FakeOpener(FakeResponse(_response(finish_reason=finish_reason)))
                 with (

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import unittest
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from roleplay_kernel import (
@@ -17,7 +17,6 @@ from roleplay_kernel import (
     ModuleDefinition,
     ModuleDefinitionError,
     ModuleRegistry,
-    ProviderError,
     RoleplayState,
     Session,
     StateDelta,
@@ -38,6 +37,7 @@ class ScriptedProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
     ) -> Completion:
         self.calls.append((messages[-1].content, temperature, max_tokens, json_mode))
         if not self.responses:
@@ -58,6 +58,7 @@ class BlockingProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
     ) -> Completion:
         self.started.set()
         if not self.release.wait(timeout=3):
@@ -67,6 +68,7 @@ class BlockingProvider:
             temperature=temperature,
             max_tokens=max_tokens,
             json_mode=json_mode,
+            sampling=sampling,
         )
 
 
@@ -422,18 +424,21 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(session.state.location, "unspecified")
         self.assertEqual(result.pending_operations.operations[0].impact, "high")
 
-    def test_truncated_completion_is_rejected(self) -> None:
+    def test_truncated_completion_is_accepted_as_partial_output(self) -> None:
         provider = ScriptedProvider(
-            [Completion("The door opened", "test-model", finish_reason="length")]
+            [
+                Completion("The door opened", "test-model", finish_reason="length"),
+                Completion('{"operations": []}', "test-model"),
+            ]
         )
         engine = Engine(provider, config=EngineConfig(mode="fast"))
         session = engine.new_session()
 
-        with self.assertRaisesRegex(ProviderError, "length"):
-            engine.advance(session, "I open the door")
+        result = engine.advance(session, "I open the door")
 
+        self.assertEqual(result.text, "The door opened")
+        self.assertEqual(result.status, "ok")
         self.assertEqual(session.state.version, 0)
-        self.assertEqual(session.turns, ())
 
     def test_session_snapshot_waits_for_the_turn_transaction(self) -> None:
         provider = BlockingProvider(

@@ -38,7 +38,7 @@ from .validators import (
 
 EngineMode = Literal["fast", "balanced", "strict"]
 TurnStatus = Literal["ok", "repaired", "needs_confirmation", "needs_attention"]
-_ALLOWED_FINISH_REASONS = {None, "stop", "end_turn", "eos"}
+_ALLOWED_FINISH_REASONS = {None, "stop", "end_turn", "eos", "length"}
 
 
 class StaleTurnResultError(RuntimeError):
