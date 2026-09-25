@@ -21,7 +21,6 @@ const DEFAULT_SETTINGS = Object.freeze({
 
 let settings = null;
 let currentGenerationType = 'normal';
-let currentGenerationActive = false;
 let uiReady = false;
 const statusRequests = new Map();
 let verifiedSidecarBase = null;
@@ -211,7 +210,6 @@ function shouldRoute() {
         && settings.autoRoute
         && isCustomSource()
         && !context.groupId
-        && !context.chatMetadata?.[MODULE_NAME]?.desynchronized
     );
 }
 
@@ -298,7 +296,6 @@ function onPromptReady(data) {
     if (
         !shouldRoute()
         || data?.dryRun
-        || !currentGenerationActive
         || !SUPPORTED_GENERATIONS.has(currentGenerationType)
     ) {
         return;
@@ -819,10 +816,8 @@ function registerEvents() {
             return;
         }
         currentGenerationType = String(type || 'normal');
-        currentGenerationActive = true;
     });
     context.eventSource.on(context.eventTypes.GENERATION_ENDED, () => {
-        currentGenerationActive = false;
         currentGenerationType = 'normal';
         if (settings?.enabled) {
             void refreshStatus({ silent: true });
