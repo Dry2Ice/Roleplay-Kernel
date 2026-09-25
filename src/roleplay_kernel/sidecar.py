@@ -184,7 +184,7 @@ class SidecarConfig:
         upstream_timeout_seconds = _env_int(
             env,
             "RPK_UPSTREAM_TIMEOUT_SECONDS",
-            _config_int(data.get("upstream_timeout_seconds"), 300),
+            _config_int(data.get("upstream_timeout_seconds"), 600),
             minimum=30,
         )
         max_repairs = _env_int(

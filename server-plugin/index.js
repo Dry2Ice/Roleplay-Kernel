@@ -184,7 +184,7 @@ function buildConfig(port) {
         token_budget: existing.token_budget || 18000,
         max_output_tokens: Math.max(Number(existing.max_output_tokens) || 0, 8192),
         max_internal_tokens: Math.max(Number(existing.max_internal_tokens) || 0, 4096),
-        upstream_timeout_seconds: Math.max(Number(existing.upstream_timeout_seconds) || 0, 300),
+        upstream_timeout_seconds: Math.max(Number(existing.upstream_timeout_seconds) || 0, 600),
         max_repairs: existing.max_repairs ?? 1,
         max_context_chars: existing.max_context_chars || 16000,
         allow_insecure_http: existing.allow_insecure_http === true,
