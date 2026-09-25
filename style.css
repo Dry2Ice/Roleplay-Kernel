@@ -42,6 +42,22 @@
     margin-bottom: 8px;
 }
 
+.roleplay-kernel-settings .rpk-progress {
+    height: 6px;
+    overflow: hidden;
+    border-radius: 3px;
+    background: rgba(127, 127, 127, 0.25);
+    margin: 6px 0;
+}
+
+.roleplay-kernel-settings .rpk-progress-bar {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--SmartThemeQuoteColor, #4caf50);
+    transition: width 180ms ease;
+}
+
 .roleplay-kernel-settings .rpk-checkbox {
     display: flex;
     align-items: center;

@@ -160,6 +160,63 @@ class Engine:
         if self.compiler.token_budget + output_reserve > self.config.context_window:
             raise ValueError("compiler token budget plus output reserve exceeds context window")
         self._pending_commits: dict[tuple[str, str], PendingCommit] = {}
+        self._progress: dict[str, JsonValue] = {
+            "active": False,
+            "phase": "idle",
+            "completed": 0,
+            "total": 0,
+            "message": "",
+        }
+
+    @property
+    def progress(self) -> dict[str, JsonValue]:
+        return dict(self._progress)
+
+    def _begin_progress(self) -> None:
+        total = {"lite": 1, "fast": 2, "balanced": 4, "strict": 5}.get(
+            self.config.mode,
+            4,
+        )
+        self._progress = {
+            "active": True,
+            "phase": "starting",
+            "completed": 0,
+            "total": total,
+            "message": "Подготовка",
+        }
+
+    def _set_progress(
+        self,
+        phase: str,
+        completed: int,
+        message: str,
+    ) -> None:
+        raw_total = self._progress.get("total", 0)
+        total = raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) else 0
+        self._progress = {
+            "active": True,
+            "phase": phase,
+            "completed": min(completed, total) if total else completed,
+            "total": total,
+            "message": message,
+        }
+
+    def _finish_progress(self, status: str) -> None:
+        self._progress = {
+            "active": False,
+            "phase": "done",
+            "completed": self._progress.get("total", 0),
+            "total": self._progress.get("total", 0),
+            "message": f"Готово: {status}",
+        }
+
+    def _fail_progress(self) -> None:
+        self._progress = {
+            **self._progress,
+            "active": False,
+            "phase": "error",
+            "message": "Ошибка запроса",
+        }
 
     def clear_pending_for_session(self, session_id: str) -> None:
         for key in tuple(self._pending_commits):
@@ -229,14 +286,21 @@ class Engine:
         sampling: Mapping[str, JsonValue] | None = None,
     ) -> TurnResult:
         with session._lock:
-            return self._advance_locked(
-                session,
-                user_input,
-                forced_modules=forced_modules,
-                disabled_modules=disabled_modules,
-                external_context=external_context,
-                sampling=sampling,
-            )
+            self._begin_progress()
+            try:
+                result = self._advance_locked(
+                    session,
+                    user_input,
+                    forced_modules=forced_modules,
+                    disabled_modules=disabled_modules,
+                    external_context=external_context,
+                    sampling=sampling,
+                )
+            except Exception:
+                self._fail_progress()
+                raise
+            self._finish_progress(result.status)
+            return result
 
     def _advance_locked(
         self,
@@ -284,6 +348,7 @@ class Engine:
             json_mode=False,
             completions=completions,
             sampling=sampling,
+            phase="render",
         ).content.strip()
         if not candidate:
             raise RuntimeError("renderer returned an empty post")
@@ -707,6 +772,7 @@ class Engine:
             max_tokens=self.config.max_internal_tokens,
             json_mode=True,
             completions=completions,
+            phase="plan",
         )
         try:
             raw = parse_json_object(completion.content)
@@ -742,6 +808,7 @@ class Engine:
             max_tokens=self.config.max_internal_tokens,
             json_mode=True,
             completions=completions,
+            phase="extract",
         )
         try:
             raw = parse_json_object(completion.content)
@@ -785,6 +852,7 @@ class Engine:
             max_tokens=self.config.max_internal_tokens,
             json_mode=True,
             completions=completions,
+            phase="critic",
         )
         try:
             raw = parse_json_object(completion.content)
@@ -829,6 +897,7 @@ class Engine:
             json_mode=False,
             completions=completions,
             sampling=sampling,
+            phase="repair",
         ).content
 
     def _complete(
@@ -840,7 +909,9 @@ class Engine:
         json_mode: bool,
         completions: list[Completion],
         sampling: Mapping[str, JsonValue] | None = None,
+        phase: str = "request",
     ) -> Completion:
+        self._set_progress(phase, len(completions), phase)
         completion = self.provider.complete(
             (
                 ChatMessage(role="system", content=prompt.system),
@@ -851,6 +922,7 @@ class Engine:
             json_mode=json_mode and self.config.use_json_mode,
             sampling=sampling,
         )
+        self._set_progress(phase, len(completions) + 1, phase)
         if completion.finish_reason not in _ALLOWED_FINISH_REASONS:
             raise ProviderError(
                 f"provider stopped with unsupported finish_reason={completion.finish_reason}"

@@ -231,14 +231,23 @@ class STConnectionProfileProvider:
     secret_id: str = field(default="", repr=False)
     timeout: float = 120.0
     token_parameter: TokenParameter = "max_tokens"
+    inter_request_delay_seconds: float = 0.0
     _opener: urllib.request.OpenerDirector = field(init=False, repr=False, compare=False)
     _csrf_token: str | None = field(init=False, default=None, repr=False, compare=False)
     _rate_limit_until: float = field(init=False, default=0.0, repr=False, compare=False)
+    _next_request_at: float = field(init=False, default=0.0, repr=False, compare=False)
     _lock: RLock = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         normalized_base = _validate_st_base_url(self.st_base_url)
         _validate_timeout(self.timeout)
+        if (
+            isinstance(self.inter_request_delay_seconds, bool)
+            or not isinstance(self.inter_request_delay_seconds, (int, float))
+            or not math.isfinite(float(self.inter_request_delay_seconds))
+            or not 0.0 <= float(self.inter_request_delay_seconds) <= 600.0
+        ):
+            raise ValueError("inter_request_delay_seconds must be between 0 and 600")
         if not re.fullmatch(r"[a-z0-9_-]{1,64}", self.source):
             raise ValueError("profile source is invalid")
         if not isinstance(self.model, str) or not self.model.strip() or len(self.model) > 256:
@@ -286,6 +295,7 @@ class STConnectionProfileProvider:
             rate_limit_retries = 0
             while True:
                 self._wait_for_rate_limit()
+                self._wait_for_inter_request()
                 try:
                     return self._post(messages, token, temperature, max_tokens, json_mode, sampling)
                 except _STCsrfError:
@@ -302,6 +312,19 @@ class STConnectionProfileProvider:
                     retry_sampling = dict(sampling or {})
                     retry_sampling["max_tokens"] = max_tokens
                     sampling = retry_sampling
+
+    def _mark_response_started(self) -> None:
+        if self.inter_request_delay_seconds > 0:
+            object.__setattr__(
+                self,
+                "_next_request_at",
+                time.monotonic() + self.inter_request_delay_seconds,
+            )
+
+    def _wait_for_inter_request(self) -> None:
+        remaining = self._next_request_at - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
 
     def _mark_rate_limited(self) -> None:
         object.__setattr__(
@@ -384,6 +407,7 @@ class STConnectionProfileProvider:
         )
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
+                self._mark_response_started()
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as error:
             status = error.code

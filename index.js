@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     model: 'roleplay-kernel',
     profileId: '',
     mode: 'balanced',
+    requestDelaySeconds: 0,
     language: 'ru',
     pov: 'third_person_limited',
     tense: 'past',
@@ -38,6 +39,7 @@ let settings = null;
 let currentGenerationType = 'normal';
 let uiReady = false;
 const statusRequests = new Map();
+let progressTimer = null;
 let verifiedSidecarBase = null;
 
 function getContext() {
@@ -334,6 +336,7 @@ function onPromptReady(data) {
         transcript,
         generation_type: currentGenerationType,
         mode: settings.mode,
+        request_delay_seconds: Number(settings.requestDelaySeconds) || 0,
         language: settings.language,
         pov: settings.pov,
         tense: settings.tense,
@@ -578,7 +581,42 @@ function renderStatus(status) {
     reject.disabled = !status.pending_request_id;
 }
 
-async function refreshStatus({ silent = false } = {}) {
+function renderProgress(progress) {
+    const bar = document.getElementById('rpk_progress_bar');
+    const text = document.getElementById('rpk_progress_text');
+    const active = Boolean(progress?.active);
+    const completed = Number(progress?.completed) || 0;
+    const total = Number(progress?.total) || 0;
+    const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+    if (bar) {
+        bar.style.width = `${percent}%`;
+    }
+    if (text) {
+        text.textContent = active
+            ? `${progress?.message || 'Обработка'}: ${completed}/${total || '?'}`
+            : progress?.message || 'Готов к работе';
+    }
+}
+
+function startProgressPolling() {
+    if (progressTimer !== null) {
+        return;
+    }
+    progressTimer = window.setInterval(() => {
+        if (settings?.enabled) {
+            void refreshStatus({ silent: true, includeTranscript: false });
+        }
+    }, 1000);
+}
+
+function stopProgressPolling() {
+    if (progressTimer !== null) {
+        window.clearInterval(progressTimer);
+        progressTimer = null;
+    }
+}
+
+async function refreshStatus({ silent = false, includeTranscript = true } = {}) {
     const binding = ensureChatBinding();
     if (!binding) {
         return null;
@@ -590,10 +628,11 @@ async function refreshStatus({ silent = false } = {}) {
     }
     const request = (async () => {
         try {
-            const status = await controlTunnel('status', {
-                session_id: sessionId,
-                transcript: transcriptSnapshot(),
-            });
+            const statusPayload = { session_id: sessionId };
+            if (includeTranscript) {
+                statusPayload.transcript = transcriptSnapshot();
+            }
+            const status = await controlTunnel('status', statusPayload);
             const current = ensureChatBinding();
             if (!current || current.sessionId !== sessionId) {
                 return null;
@@ -607,6 +646,7 @@ async function refreshStatus({ silent = false } = {}) {
             }
             saveChatBinding();
             renderStatus(status);
+            renderProgress(status.progress);
             if (!silent) {
                 toastr.success('Roleplay Kernel подключён');
             }
@@ -619,6 +659,7 @@ async function refreshStatus({ silent = false } = {}) {
             current.status = 'offline';
             saveChatBinding();
             renderStatus(null);
+            renderProgress(null);
             if (!silent) {
                 toastr.error(String(error.message || error));
             }
@@ -689,6 +730,7 @@ async function activateRouting() {
         context.chatCompletionSettings.custom_prompt_post_processing = '';
         settings.enabled = true;
         settings.autoRoute = true;
+        startProgressPolling();
         assertRoutingConnection();
         saveSettings();
         const status = await refreshStatus();
@@ -715,6 +757,7 @@ async function activateRouting() {
 
 function disableRouting() {
     settings.enabled = false;
+    stopProgressPolling();
     restorePreviousConnection();
     saveSettings();
     renderStatus(null);
@@ -753,6 +796,7 @@ async function runControl(action) {
         }
         saveChatBinding();
         renderStatus(status);
+        renderProgress(status.progress);
         toastr.success('Состояние обновлено');
     } catch (error) {
         toastr.error(String(error.message || error));
@@ -774,6 +818,7 @@ function bindUi() {
     const model = document.getElementById('rpk_model');
     const profile = document.getElementById('rpk_profile');
     const mode = document.getElementById('rpk_mode');
+    const requestDelay = document.getElementById('rpk_request_delay');
     const language = document.getElementById('rpk_language');
     const autoRoute = document.getElementById('rpk_auto_route');
     const launch = document.getElementById('rpk_launch');
@@ -788,6 +833,7 @@ function bindUi() {
     integrationKey.value = settings.integrationKey;
     model.value = settings.model;
     mode.value = settings.mode;
+    requestDelay.value = String(settings.requestDelaySeconds ?? 0);
     language.value = settings.language;
     autoRoute.checked = settings.autoRoute;
     refreshProfileOptions();
@@ -821,6 +867,12 @@ function bindUi() {
         settings.mode = mode.value;
         saveSettings();
     });
+    requestDelay.addEventListener('change', () => {
+        const value = Math.max(0, Math.min(600, Number(requestDelay.value) || 0));
+        settings.requestDelaySeconds = value;
+        requestDelay.value = String(value);
+        saveSettings();
+    });
     language.addEventListener('change', () => {
         settings.language = language.value;
         saveSettings();
@@ -838,9 +890,11 @@ function bindUi() {
     reject.addEventListener('click', () => void runControl('reject'));
     reset.addEventListener('click', () => void runControl('reset'));
     renderStatus(null);
+    renderProgress(null);
     renderRuntimeStatus({ running: false });
     void refreshRuntimeStatus();
     void refreshStatus({ silent: true });
+    startProgressPolling();
 }
 
 async function renderUi() {

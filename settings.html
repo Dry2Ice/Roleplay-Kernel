@@ -10,6 +10,10 @@
                 <small id="rpk_version"></small>
             </div>
             <div id="rpk_details" class="rpk-details"></div>
+            <div class="rpk-progress" aria-label="Kernel progress">
+                <div id="rpk_progress_bar" class="rpk-progress-bar"></div>
+            </div>
+            <small id="rpk_progress_text" class="rpk-details">Готов к работе</small>
             <label class="rpk-field">
                 <span>ST connection profile</span>
                 <select id="rpk_profile">
@@ -39,6 +43,11 @@
                         <option value="fast">Fast — render + state extraction</option>
                         <option value="lite">Lite — один render-вызов</option>
                     </select>
+                </label>
+                <label class="rpk-field">
+                    <span>Пауза между запросами, сек</span>
+                    <input id="rpk_request_delay" type="number" min="0" max="600" step="1" />
+                    <small class="rpk-details">Таймер отсчитывается после начала получения ответа ST.</small>
                 </label>
                 <label class="rpk-field">
                     <span>Language</span>

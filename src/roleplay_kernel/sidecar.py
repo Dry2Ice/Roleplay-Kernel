@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -362,6 +363,7 @@ class GenerationEnvelope:
     tense: str
     operation: str = "generate"
     mode: EngineMode = "balanced"
+    request_delay_seconds: float = 0.0
     upstream_profile: STProfileConfig | None = None
     sampling: dict[str, JsonValue] = field(default_factory=dict)
 
@@ -377,6 +379,7 @@ class GenerationEnvelope:
             "pov": self.pov,
             "tense": self.tense,
             "mode": self.mode,
+            "request_delay_seconds": self.request_delay_seconds,
             "sampling": dict(self.sampling),
         }
         if self.upstream_profile is not None:
@@ -425,6 +428,15 @@ class GenerationEnvelope:
             EngineMode,
             _choice(data, "mode", "balanced", {"lite", "fast", "balanced", "strict"}),
         )
+        delay_value = data.get("request_delay_seconds", 0.0)
+        if (
+            isinstance(delay_value, bool)
+            or not isinstance(delay_value, (int, float))
+            or not math.isfinite(float(delay_value))
+            or not 0.0 <= float(delay_value) <= 600.0
+        ):
+            raise SidecarError("invalid_envelope", "request_delay_seconds is invalid")
+        request_delay_seconds = float(delay_value)
         return cls(
             protocol=protocol,
             session_id=session_id,
@@ -441,6 +453,7 @@ class GenerationEnvelope:
             tense=_choice(data, "tense", "past", {"past", "present", "future"}),
             operation=operation,
             mode=mode,
+            request_delay_seconds=request_delay_seconds,
             upstream_profile=profile,
             sampling=sampling,
         )
@@ -635,7 +648,7 @@ class SessionService:
         )
         self._direct_provider = self.provider
         self._profile_provider: STConnectionProfileProvider | None = None
-        self._profile_signature: tuple[str, str, str, str, str, str] | None = None
+        self._profile_signature: tuple[str, str, str, str, str, str, str] | None = None
         self._generation_lock = threading.RLock()
         self.engine = Engine(
             self.provider,
@@ -665,7 +678,11 @@ class SessionService:
         if self.engine.config.mode != mode:
             self.engine.config = replace(self.engine.config, mode=mode)
 
-    def _apply_upstream_profile(self, profile: STProfileConfig | None) -> None:
+    def _apply_upstream_profile(
+        self,
+        profile: STProfileConfig | None,
+        request_delay_seconds: float = 0.0,
+    ) -> None:
         if profile is None:
             if self._profile_signature is not None:
                 self.provider = self._direct_provider
@@ -680,6 +697,7 @@ class SessionService:
             profile.api_url,
             profile.model,
             profile.secret_id,
+            str(request_delay_seconds),
         )
         if signature == self._profile_signature and self._profile_provider is not None:
             return
@@ -692,6 +710,7 @@ class SessionService:
                 secret_id=profile.secret_id,
                 token_parameter=self.config.upstream_token_parameter,
                 timeout=float(self.config.upstream_timeout_seconds),
+                inter_request_delay_seconds=request_delay_seconds,
             )
         except ValueError as error:
             raise SidecarError("invalid_profile", str(error), 400) from error
@@ -756,7 +775,10 @@ class SessionService:
             record.checkpoint = record.session.to_dict()
             with self._generation_lock:
                 self._apply_mode(envelope.mode)
-                self._apply_upstream_profile(envelope.upstream_profile)
+                self._apply_upstream_profile(
+                    envelope.upstream_profile,
+                    envelope.request_delay_seconds,
+                )
                 result = self.engine.advance(
                     record.session,
                     user_input,
@@ -957,6 +979,7 @@ class SessionService:
                 "state_version": 0,
                 "pending_request_id": None,
                 "last_result": {},
+                "progress": self.engine.progress,
             }
         last_result = record.last_result or {}
         pending_value = last_result.get("pending_operations")
@@ -977,6 +1000,7 @@ class SessionService:
             "pending_request_id": record.pending_request_id,
             "pending_count": pending_count,
             "status": status,
+            "progress": self.engine.progress,
             "active_modules": last_result.get("active_modules", []),
             "findings": last_result.get("findings", []),
             "context_hash": record.context_hash,
@@ -1678,6 +1702,7 @@ def _request_fingerprint(
         [
             envelope.generation_type,
             envelope.mode,
+            envelope.request_delay_seconds,
             transcript,
             context_prompt.strip(),
             profile,
