@@ -560,6 +560,7 @@ def apply_delta(
     delta: StateDelta,
     *,
     allow_high_impact: bool = False,
+    source_turn_id: str = "",
 ) -> tuple[StateDelta, StateDelta]:
     applied: list[StateOperation] = []
     pending: list[StateOperation] = []
@@ -571,10 +572,40 @@ def apply_delta(
             pending.append(normalized)
             continue
         _apply_operation(state, normalized)
+        if source_turn_id:
+            _record_provenance(state, normalized, source_turn_id)
         applied.append(normalized)
     if applied:
         state.version += 1
     return StateDelta(tuple(applied)), StateDelta(tuple(pending))
+
+
+_PROVENANCE_CATEGORIES: dict[str, str] = {
+    "set_time": "",
+    "set_location": "location",
+    "set_summary": "summary",
+    "set_scene_tag": "scene_tags",
+    "upsert_fact": "facts",
+    "upsert_belief": "beliefs",
+    "set_relationship": "relationships",
+    "set_resource": "resources",
+    "set_injury": "injuries",
+    "open_thread": "open_threads",
+    "resolve_thread": "resolved_threads",
+    "record_event": "events",
+}
+
+
+def _record_provenance(
+    state: RoleplayState,
+    operation: StateOperation,
+    source_turn_id: str,
+) -> None:
+    category = _PROVENANCE_CATEGORIES.get(operation.kind)
+    if category is None:
+        return
+    key = f"{category}:{operation.target or operation.value}"
+    state.provenance[key] = source_turn_id
 
 
 def _apply_operation(state: RoleplayState, operation: StateOperation) -> None:

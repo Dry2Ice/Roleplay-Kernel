@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import unittest
 from collections.abc import Callable, Mapping, Sequence
@@ -472,6 +473,125 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(metrics.delivered)
         self.assertIsNotNone(metrics.first_token_seconds)
         self.assertGreaterEqual(metrics.total_seconds, 0.0)
+
+    def test_provenance_records_the_turn_that_wrote_each_entry(self) -> None:
+        engine = Engine(
+            ScriptedProvider(
+                [
+                    Completion(_plan_json(), "test-model"),
+                    Completion("He cut his knee on the railing.", "test-model"),
+                    Completion(
+                        json.dumps(
+                            {
+                                "operations": [
+                                    {
+                                        "kind": "record_event",
+                                        "value": "He cut his knee on the railing",
+                                        "target": "knee_cut",
+                                        "impact": "low",
+                                        "evidence": "cut his knee on the railing",
+                                        "certainty": 0.9,
+                                    }
+                                ]
+                            }
+                        ),
+                        "test-model",
+                    ),
+                    Completion('{"findings": []}', "test-model"),
+                ]
+            ),
+            config=EngineConfig(mode="balanced"),
+        )
+        session = engine.new_session()
+
+        result = engine.advance(session, "Я порезал колено")
+
+        blocked = [(f.code, f.message) for f in result.findings]
+        self.assertEqual([f.code for f in result.findings], [], f"delta blocked: {blocked}")
+        self.assertIn("He cut his knee on the railing", session._state.events)
+        self.assertEqual(
+            session._state.provenance.get("events:knee_cut"),
+            result.assistant_turn_id,
+        )
+        prompt = session._state.to_prompt_dict()
+        self.assertNotIn("provenance", prompt, "provenance must stay out of prompts")
+
+    def test_audit_reports_entries_orphaned_by_a_rewrite(self) -> None:
+        engine = Engine(ScriptedProvider([]), config=EngineConfig(mode="lite"))
+        session = engine.new_session()
+        turn = session.append_turn("user", "Original question")
+        answer = session.append_turn("assistant", "Original answer")
+        session._state.injuries["knee"] = "bleeding"
+        session._state.provenance["injuries:knee"] = answer.id
+        del turn
+
+        self.assertEqual(engine.audit_state_provenance(session), ())
+
+        session.supersede_turns([("user", "Nothing matches at all")])
+        findings = engine.audit_state_provenance(session)
+        codes = {finding.code for finding in findings}
+        self.assertIn("state_orphaned_by_rewrite", codes)
+
+    def test_prompts_carry_elapsed_time_between_turns(self) -> None:
+        engine = Engine(ScriptedProvider([]), config=EngineConfig(mode="lite"))
+        session = engine.new_session()
+        first = session.append_turn("user", "Earlier question")
+        second = session.append_turn("assistant", "Earlier answer")
+        self.assertLess(session.elapsed_since_last_turn(), 5.0)
+        object.__setattr__(first, "created_at", "2000-01-01T00:00:00+00:00")
+        object.__setattr__(second, "created_at", "2000-01-01T00:00:00+00:00")
+
+        elapsed = session.elapsed_since_last_turn()
+        self.assertGreater(elapsed, 0.0)
+
+        session._state.elapsed_hint = int(elapsed)
+        pack = engine.compiler.compile_render(
+            state=session._state,
+            turns=session._turns,
+            user_input="Next",
+            plan={"goal": "continue"},
+            activations=(),
+        )
+        self.assertIn("TIME_PASSAGE_DATA", pack.user)
+        self.assertIn(str(int(elapsed)), pack.user)
+        self.assertNotIn("elapsed_hint", session._state.to_prompt_dict())
+
+    def test_superseded_turns_are_excluded_from_prompts(self) -> None:
+        engine = Engine(
+            ScriptedProvider(
+                [
+                    Completion(_plan_json(), "test-model"),
+                    Completion("The station was silent.", "test-model"),
+                ]
+            ),
+            config=EngineConfig(mode="balanced"),
+        )
+        session = engine.new_session()
+        session.append_turn("user", "Old question the user deleted")
+        session.append_turn("assistant", "Old answer the user deleted")
+        session.append_turn("user", "Kept question")
+        session.append_turn("assistant", "Kept answer")
+
+        changed = session.supersede_turns(
+            [
+                ("user", "kept question"),
+                ("assistant", "kept answer"),
+            ]
+        )
+
+        self.assertEqual(changed, 2)
+        self.assertEqual(len(session.turns), 4, "superseded turns stay in the ledger")
+        self.assertEqual(len(session.active_turns()), 2)
+
+        pack = engine.compiler.compile_render(
+            state=session._state,
+            turns=session._turns,
+            user_input="Next",
+            plan={"goal": "continue"},
+            activations=(),
+        )
+        self.assertIn("Kept answer", pack.user)
+        self.assertNotIn("Old answer the user deleted", pack.user)
 
     def test_lite_mode_uses_one_render_request(self) -> None:
         provider = ScriptedProvider(

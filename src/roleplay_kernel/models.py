@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+import re
+import unicodedata
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -143,6 +145,15 @@ class RoleplayState:
     resolved_threads: list[str] = field(default_factory=lambda: [])
     scene_tags: list[str] = field(default_factory=lambda: [])
     events: list[str] = field(default_factory=lambda: [])
+    provenance: dict[str, str] = field(default_factory=lambda: {})
+    """Tracks which assistant turn last wrote each state entry.
+
+    Keys are `category:name` (for example `injuries:knee`). When a chat is
+    rewritten and the originating turn is superseded, the audit uses this map
+    to report entries that no longer rest on visible text.
+    """
+    elapsed_hint: int = 0
+    """Seconds elapsed since the previous turn, refreshed before each prompt."""
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {
@@ -162,11 +173,16 @@ class RoleplayState:
             "resolved_threads": list(self.resolved_threads),
             "scene_tags": list(self.scene_tags),
             "events": list(self.events),
+            "provenance": dict(sorted(self.provenance.items())),
+            "elapsed_hint": self.elapsed_hint,
         }
 
     def to_prompt_dict(self, *, max_items: int = 80) -> dict[str, JsonValue]:
         limit = max(1, max_items)
         data = self.to_dict()
+        # Provenance and elapsed time are internal bookkeeping, not story state.
+        data.pop("provenance", None)
+        data.pop("elapsed_hint", None)
         data["summary"] = _limit_prompt_text(self.summary, 4000)
         facts_prompt = _tail_dict(self.facts, limit, 1000)
         beliefs_prompt = cast(
@@ -225,6 +241,8 @@ class RoleplayState:
                 "scene_tags",
             ),
             events=_string_list(_array(data.get("events"), "events"), "events"),
+            provenance=_string_map(data.get("provenance")),
+            elapsed_hint=_optional_int(data, "elapsed_hint", 0),
         )
 
     def upsert_belief(self, operation: StateOperation) -> None:
@@ -263,6 +281,13 @@ class ConversationTurn:
     role: Literal["user", "assistant"]
     content: str
     created_at: str
+    superseded: bool = False
+    """True when the chat was rewritten outside the kernel.
+
+    A superseded turn stays in the ledger because ledger events reference it,
+    but it must never reach a prompt: the authoritative SillyTavern transcript
+    already replaced it.
+    """
 
     def to_dict(self) -> dict[str, JsonValue]:
         return asdict(self)
@@ -276,11 +301,15 @@ class ConversationTurn:
             turn_role = "assistant"
         else:
             raise ValueError("role must be user or assistant")
+        superseded = data.get("superseded", False)
+        if not isinstance(superseded, bool):
+            raise ValueError("superseded must be a boolean")
         return cls(
             id=_required_str(data, "id"),
             role=cast(Literal["user", "assistant"], turn_role),
             content=_required_str(data, "content"),
             created_at=_required_str(data, "created_at"),
+            superseded=superseded,
         )
 
 
@@ -370,6 +399,56 @@ class Session:
             self._state = working
             self.updated_at = utc_now()
             return working.version
+
+    def elapsed_since_last_turn(self) -> float:
+        """Seconds elapsed since the previous turn, or 0 for the first one."""
+        with self._lock:
+            if not self._turns:
+                return 0.0
+            previous = self._turns[-1].created_at
+        try:
+            stamp = datetime.fromisoformat(previous)
+        except ValueError:
+            return 0.0
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        return max(0.0, (datetime.now(UTC) - stamp).total_seconds())
+
+    def active_turns(self) -> tuple[ConversationTurn, ...]:
+        """Turns that still match the authoritative chat transcript."""
+        with self._lock:
+            return tuple(turn for turn in self._turns if not turn.superseded)
+
+    def supersede_turns(self, keep_identities: Sequence[tuple[str, str]]) -> int:
+        """Mark turns that the external transcript replaced as superseded.
+
+        `keep_identities` is the authoritative history as (role, content) pairs.
+        The longest matching suffix is retained and everything older is marked,
+        so prompts keep only turns the user can still see. Ledger events are
+        untouched: they are an audit log and may still reference these turns.
+        """
+        with self._lock:
+            if not keep_identities:
+                return 0
+            suffix_length = min(len(keep_identities), len(self._turns))
+            matched = 0
+            while (
+                matched < suffix_length
+                and self._turns[len(self._turns) - 1 - matched].role
+                == keep_identities[len(keep_identities) - 1 - matched][0]
+                and _identity(self._turns[len(self._turns) - 1 - matched].content)
+                == _identity(keep_identities[len(keep_identities) - 1 - matched][1])
+            ):
+                matched += 1
+            cut = len(self._turns) - matched
+            changed = 0
+            for turn in self._turns[:cut]:
+                if not turn.superseded:
+                    object.__setattr__(turn, "superseded", True)
+                    changed += 1
+            if changed:
+                self.updated_at = utc_now()
+            return changed
 
     def apply_output_settings(
         self,
@@ -552,6 +631,13 @@ def _array(value: JsonValue | None, name: str) -> list[JsonValue]:
     return value
 
 
+def _identity(value: str) -> str:
+    """Normalised comparison key for transcript matching."""
+    normalized = unicodedata.normalize("NFKC", value).replace("\u200b", "")
+    normalized = re.sub(r"[*_`~]", "", normalized)
+    return re.sub(r"\s+", " ", normalized).strip().casefold()
+
+
 def _required_str(data: dict[str, JsonValue], key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -618,6 +704,15 @@ def _required_int(data: dict[str, JsonValue], key: str, *, minimum: int = 0) -> 
         raise ValueError(f"{key} must be an integer")
     if value < minimum:
         raise ValueError(f"{key} must be at least {minimum}")
+    return value
+
+
+def _optional_int(data: dict[str, JsonValue], key: str, default: int) -> int:
+    value = data.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer")
     return value
 
 

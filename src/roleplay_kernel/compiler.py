@@ -66,9 +66,12 @@ class ContextCompiler:
         external_context: str = "",
     ) -> PromptPack:
         recent_turns = self._fit_recent_turns(tuple(turns))
+        elapsed = state.elapsed_hint
         system = _planner_system(state.language, _render_modules(activations))
+        time_passage = {"elapsed_seconds_since_last_turn": elapsed}
         user = (
             f"STATE_DATA\n{_json(state.to_prompt_dict())}\n\n"
+            f"TIME_PASSAGE_DATA\n{_json(time_passage)}\n\n"
             f"{_external_context_section(external_context)}"
             f"RECENT_TURNS_DATA\n{_json([turn.to_dict() for turn in recent_turns])}\n\n"
             f"PLAYER_INPUT_DATA\n{_json({'content': user_input})}\n\n"
@@ -98,9 +101,11 @@ class ContextCompiler:
         recent_turns = self._fit_recent_turns(tuple(turns))
         language_name = _language_name(state.language)
         output_language = {"language": state.language, "name": language_name}
+        time_passage = {"elapsed_seconds_since_last_turn": state.elapsed_hint}
         system = _renderer_system(state.language, _render_modules(activations))
         user = (
             f"STATE_DATA\n{_json(state.to_prompt_dict())}\n\n"
+            f"TIME_PASSAGE_DATA\n{_json(time_passage)}\n\n"
             f"{_external_context_section(external_context)}"
             f"RECENT_TURNS_DATA\n{_json([turn.to_dict() for turn in recent_turns])}\n\n"
             f"PLAYER_INPUT_DATA\n{_json({'content': user_input})}\n\n"
@@ -209,13 +214,16 @@ class ContextCompiler:
         self,
         turns: tuple[ConversationTurn, ...],
     ) -> tuple[ConversationTurn, ...]:
+        # Superseded turns are kept in the ledger but must never reach a prompt:
+        # the user no longer sees them in the chat.
+        usable = [turn for turn in turns if not turn.superseded]
         selected: list[ConversationTurn] = []
         used = 0
         available_budget = max(256, self.token_budget // 3)
-        index = len(turns) - 1
+        index = len(usable) - 1
         while index >= 1 and len(selected) < self.max_recent_turns:
-            assistant = turns[index]
-            user = turns[index - 1]
+            assistant = usable[index]
+            user = usable[index - 1]
             if user.role != "user" or assistant.role != "assistant":
                 index -= 1
                 continue

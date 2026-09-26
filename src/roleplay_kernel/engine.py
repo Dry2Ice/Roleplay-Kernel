@@ -362,6 +362,36 @@ class Engine:
             self._finish_progress(result.status)
             return result
 
+    def audit_state_provenance(self, session: Session) -> tuple[Finding, ...]:
+        """Report state entries whose originating post is no longer visible.
+
+        A chat rewritten outside the kernel leaves entries that the user can no
+        longer see any evidence for. They are not deleted automatically: the
+        finding tells the user and the critic can re-verify the entry.
+        """
+        superseded_ids = {turn.id for turn in session._turns if turn.superseded}
+        if not superseded_ids:
+            return ()
+        orphans = sorted(
+            key for key, turn_id in session._state.provenance.items()
+            if turn_id in superseded_ids
+        )
+        if not orphans:
+            return ()
+        return (
+            Finding(
+                severity="warning",
+                code="state_orphaned_by_rewrite",
+                message=(
+                    f"{len(orphans)} state entries came from a rewritten part of the "
+                    "chat and need re-verification"
+                ),
+                evidence=", ".join(orphans[:5]),
+                rule="State must rest on text the user can still see",
+                confidence=1.0,
+            ),
+        )
+
     def _deadline(self) -> float:
         return time.monotonic() + self.config.turn_budget_seconds
 
@@ -404,6 +434,9 @@ class Engine:
         deadline = self._deadline()
         self._first_delta_seconds = None
         self._last_turn_metrics = TurnMetrics()
+        # Real elapsed time lets the planner and renderer keep the clock coherent
+        # without inventing time on their own.
+        session._state.elapsed_hint = int(session.elapsed_since_last_turn())
         request_id = new_id("request")
         base_state_version = session._state.version
         activations = self.registry.activate(
@@ -437,7 +470,7 @@ class Engine:
 
         render_pack = self.compiler.compile_render(
             state=session._state,
-            turns=session._turns,
+            turns=session.active_turns(),
             user_input=content,
             plan=plan,
             activations=activations,
@@ -512,16 +545,29 @@ class Engine:
                     external_context,
                 )
 
-        all_findings = merge_findings(plan_findings, candidate_findings)
+        all_findings = merge_findings(
+            plan_findings,
+            candidate_findings,
+            self.audit_state_provenance(session),
+        )
         if session._state.version != base_state_version:
             raise StaleTurnResultError("session state changed while the turn was being generated")
+
+        user_turn = session.append_turn("user", content)
+        assistant_turn = session.append_turn("assistant", candidate)
 
         delta_blocked = any(finding.severity == "hard" for finding in all_findings)
         if delta_blocked:
             applied_delta = StateDelta()
             pending_delta = StateDelta()
         elif self.config.auto_commit:
-            applied_delta, pending_delta = apply_delta(session._state, delta_result.delta)
+            # Provenance is recorded after the turn exists so every state entry
+            # can point at the exact post that introduced it.
+            applied_delta, pending_delta = apply_delta(
+                session._state,
+                delta_result.delta,
+                source_turn_id=assistant_turn.id,
+            )
         else:
             applied_delta = StateDelta()
             pending_delta = delta_result.delta
@@ -539,8 +585,6 @@ class Engine:
                 ),
             )
 
-        user_turn = session.append_turn("user", content)
-        assistant_turn = session.append_turn("assistant", candidate)
         pending_key = (session.id, assistant_turn.id)
         pending_digest = (
             self._pending_digest(
@@ -737,6 +781,7 @@ class Engine:
             session._state,
             pending.operations,
             allow_high_impact=True,
+            source_turn_id=assistant_turn_id,
         )
         if unexpected_pending.operations:
             raise RuntimeError("explicit state commit left operations pending")
@@ -822,7 +867,9 @@ class Engine:
         deterministic = validate_candidate(
             candidate=candidate,
             previous_assistant_turns=(
-                turn.content for turn in session._turns if turn.role == "assistant"
+                turn.content
+                for turn in session.active_turns()
+                if turn.role == "assistant"
             ),
             activations=activations,
             expected_language=session._state.language,
@@ -926,7 +973,7 @@ class Engine:
             return fallback_plan(session._state, user_input), ()
         prompt = self.compiler.compile_plan(
             state=session._state,
-            turns=session._turns,
+            turns=session.active_turns(),
             user_input=user_input,
             activations=activations,
             external_context=external_context,

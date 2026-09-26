@@ -1265,7 +1265,14 @@ class SessionService:
             suffix = incoming[len(existing) :]
         else:
             # The chat diverged (edit, deletion, swipe, or history produced
-            # outside the kernel). Append the authoritative history verbatim.
+            # outside the kernel). Mark the replaced turns and append the
+            # authoritative history verbatim.
+            session.supersede_turns(
+                [
+                    (role, _message_identity(content))
+                    for role, content in existing
+                ]
+            )
             suffix = incoming
         self._validate_pairs(suffix)
         for role, content in suffix:
