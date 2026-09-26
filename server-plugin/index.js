@@ -196,6 +196,7 @@ function buildConfig(port) {
         allow_insecure_http: existing.allow_insecure_http === true,
         turn_budget_seconds: existing.turn_budget_seconds ?? 300,
         post_render_grace_seconds: existing.post_render_grace_seconds ?? 90,
+        require_upstream_profile: true,
     };
 }
 

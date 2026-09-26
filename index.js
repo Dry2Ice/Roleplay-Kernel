@@ -4,7 +4,7 @@ const ENVELOPE_PREFIX = '[ROLEPLAY_KERNEL_ENVELOPE_V1]';
 const CONTROL_PREFIX = '[ROLEPLAY_KERNEL_CONTROL_V1]';
 const CONTROL_MODEL_PREFIX = 'roleplay-kernel-control/';
 const RUNTIME_PLUGIN_ID = 'roleplay-kernel';
-const EXTENSION_VERSION = '0.6.0';
+const EXTENSION_VERSION = '0.6.1';
 const SUPPORTED_GENERATIONS = new Set(['normal', 'regenerate', 'swipe']);
 const SUPPORTED_PROFILE_SOURCES = new Set(['openai', 'custom']);
 const SAMPLING_FIELDS = [
@@ -1267,6 +1267,14 @@ function assertRoutingConnection() {
     }
 }
 
+async function pushSelectedProfile() {
+    const profile = selectedConnectionProfile();
+    await controlTunnel('select_profile', {
+        upstream_profile: profile ? profilePayload(profile) : null,
+        request_delay_seconds: Number(settings.requestDelaySeconds) || 0,
+    });
+}
+
 async function activateRouting() {
     const previous = {
         source: getContext().chatCompletionSettings.chat_completion_source,
@@ -1289,6 +1297,7 @@ async function activateRouting() {
             throw new Error('Provide a valid integration key of at least 32 characters');
         }
         await controlTunnel('health');
+        await pushSelectedProfile();
         settings.previousConnection ??= previous;
         context.chatCompletionSettings.chat_completion_source = 'custom';
         context.chatCompletionSettings.custom_url = validateSidecarUrl(settings.sidecarUrl);
@@ -1453,6 +1462,11 @@ function bindUi() {
         settings.profileId = profile.value;
         saveSettings();
         refreshProfileOptions();
+        if (settings.enabled) {
+            void pushSelectedProfile()
+                .then(() => success('Roleplay Kernel: upstream profile applied'))
+                .catch(error => failure(`Roleplay Kernel: ${error.message}`));
+        }
     });
     mode.addEventListener('change', () => {
         settings.mode = mode.value;
@@ -1463,6 +1477,9 @@ function bindUi() {
         settings.requestDelaySeconds = value;
         requestDelay.value = String(value);
         saveSettings();
+        if (settings.enabled) {
+            void pushSelectedProfile().catch(() => {});
+        }
     });
     autoRoute.addEventListener('change', () => {
         settings.autoRoute = autoRoute.checked;

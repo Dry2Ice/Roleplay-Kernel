@@ -663,6 +663,10 @@ def _optional_str(data: dict[str, JsonValue], key: str, default: str) -> str:
 
 
 def _string_map(value: JsonValue | None) -> dict[str, str]:
+    # A missing key means "no entries", not corruption: sessions written by an
+    # older version must stay loadable after an upgrade.
+    if value is None:
+        return {}
     data = _object(value, "object")
     result: dict[str, str] = {}
     for key, item in data.items():

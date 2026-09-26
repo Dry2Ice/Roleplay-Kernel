@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -41,7 +42,7 @@ from .providers import (
 )
 from .utils import ProviderError
 
-SIDECAR_VERSION = "0.6.0"
+SIDECAR_VERSION = "0.6.1"
 PROTOCOL_VERSION = 1
 ENVELOPE_PREFIX = "[ROLEPLAY_KERNEL_ENVELOPE_V1]"
 CONTROL_PREFIX = "[ROLEPLAY_KERNEL_CONTROL_V1]"
@@ -70,6 +71,7 @@ _CONFIG_KEYS = {
     "allow_insecure_http",
     "turn_budget_seconds",
     "post_render_grace_seconds",
+    "require_upstream_profile",
 }
 
 
@@ -122,6 +124,7 @@ class SidecarConfig:
     allow_insecure_http: bool
     turn_budget_seconds: float = 300.0
     post_render_grace_seconds: float = 90.0
+    require_upstream_profile: bool = False
 
     @classmethod
     def load(cls, path: Path | None = None) -> SidecarConfig:
@@ -233,6 +236,11 @@ class SidecarConfig:
             minimum=0.0,
             maximum=600.0,
         )
+        require_upstream_profile = _env_bool(
+            env,
+            "RPK_REQUIRE_UPSTREAM_PROFILE",
+            _config_bool(data.get("require_upstream_profile"), False),
+        )
         config = cls(
             host=host,
             port=port,
@@ -253,6 +261,7 @@ class SidecarConfig:
             allow_insecure_http=allow_insecure_http,
             turn_budget_seconds=turn_budget_seconds,
             post_render_grace_seconds=post_render_grace_seconds,
+            require_upstream_profile=require_upstream_profile,
         )
         config.validate()
         return config
@@ -853,6 +862,65 @@ class SessionService:
         if self.engine.config.mode != mode:
             self.engine.config = replace(self.engine.config, mode=mode)
 
+    def _require_generation_profile(self, envelope: GenerationEnvelope) -> None:
+        """Refuse to send a turn to the fallback upstream when launched by ST.
+
+        The direct provider is a legitimate standalone configuration, so this
+        only applies when the server plugin marks the runtime as ST-managed.
+        Without a profile the turn would otherwise leave this machine for
+        whatever host the config happens to name.
+        """
+        if not self.config.require_upstream_profile:
+            return
+        if envelope.upstream_profile is not None:
+            return
+        if self._profile_provider is not None:
+            return
+        raise SidecarError(
+            "upstream_profile_required",
+            "no ST connection profile is selected, so the turn was not sent",
+            409,
+        )
+
+    def _select_profile(
+        self, payload: dict[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        """Apply an ST connection profile without waiting for a generation.
+
+        Without this the service keeps the direct fallback provider until the
+        first turn, which makes the self-test report a false negative and lets
+        a request that arrives without an envelope profile reach the fallback
+        upstream.
+        """
+        profile_value = payload.get("upstream_profile")
+        profile = (
+            STProfileConfig.from_dict(_object(profile_value, "upstream_profile"))
+            if profile_value is not None
+            else None
+        )
+        request_delay_seconds = 0.0
+        delay_value = payload.get("request_delay_seconds")
+        if delay_value is not None:
+            request_delay_seconds = _config_float(delay_value, 0.0)
+            if not 0.0 <= request_delay_seconds <= 600.0:
+                raise SidecarError(
+                    "invalid_request",
+                    "request_delay_seconds must be between 0 and 600",
+                    400,
+                )
+        with self._generation_lock:
+            self._apply_upstream_profile(profile, request_delay_seconds)
+        return {
+            "selected": profile is not None,
+            "upstream_profile_id": (
+                profile.profile_id if profile is not None else None
+            ),
+            "upstream_model": (
+                profile.model if profile is not None else self.config.upstream_model
+            ),
+            "provider": type(self.provider).__name__,
+        }
+
     def _apply_upstream_profile(
         self,
         profile: STProfileConfig | None,
@@ -960,6 +1028,7 @@ class SessionService:
                     pov=envelope.pov,
                     tense=envelope.tense,
                 )
+                self._require_generation_profile(envelope)
                 self._apply_upstream_profile(
                     envelope.upstream_profile,
                     envelope.request_delay_seconds,
@@ -1023,6 +1092,8 @@ class SessionService:
             return self.diagnostics()
         if action == "self_test":
             return self.self_test()
+        if action == "select_profile":
+            return self._select_profile(payload)
         session_id = _required_string(payload, "session_id")
         if action == "status":
             with self._active_lock:
@@ -1768,6 +1839,9 @@ class SidecarRequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(503, "storage_error", "session storage is unavailable")
             return
         except ValueError:
+            # A generic 400 with no server-side detail is a dead end for
+            # whoever has to fix it, so keep the original failure visible.
+            traceback.print_exc()
             self._send_error_json(400, "invalid_request", "request data is invalid")
             return
         except RuntimeError:

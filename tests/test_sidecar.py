@@ -7,6 +7,7 @@ import unittest
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -21,6 +22,7 @@ from roleplay_kernel.sidecar import (
     SIDECAR_VERSION,
     GenerationEnvelope,
     IncomingMessage,
+    SessionRecord,
     SessionService,
     SidecarConfig,
     SidecarError,
@@ -676,6 +678,121 @@ class SidecarTests(unittest.TestCase):
             self.assertIn("integration_key", names)
             self.assertNotIn("upstream_reachable", names)
             self.assertFalse(report["ok"])
+
+    def test_session_written_before_provenance_still_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=ScriptedProvider(_empty_turn_responses()),
+            )
+            service.generate(
+                _envelope("chat_legacy", "Я вхожу в комнату"),
+                _messages("chat_legacy", "Я вхожу в комнату"),
+                "Character: Aria",
+            )
+            record_path = Path(temporary) / "chat_legacy.json"
+            legacy = json.loads(record_path.read_text(encoding="utf-8"))["record"]
+            state = legacy["session"]["state"]
+            for key in ("provenance", "elapsed_hint", "module_reasons", "time_of_day"):
+                state.pop(key, None)
+            for turn in legacy["session"]["turns"]:
+                for key in ("superseded", "provenance", "elapsed_hint"):
+                    turn.pop(key, None)
+
+            # A session written by an older version must stay loadable after an
+            # upgrade: absent optional fields mean "empty", not corruption.
+            loaded = SessionRecord.from_dict(cast(dict[str, JsonValue], legacy))
+            self.assertEqual(loaded.session.state.provenance, {})
+            self.assertEqual(loaded.session.state.elapsed_hint, 0)
+            self.assertTrue(all(not turn.superseded for turn in loaded.session.turns))
+
+    def test_legacy_session_file_is_readable_by_a_fresh_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = SessionService(
+                _config(root),
+                provider=ScriptedProvider(_empty_turn_responses()),
+            )
+            first.generate(
+                _envelope("chat_legacy_file", "Я вхожу в комнату"),
+                _messages("chat_legacy_file", "Я вхожу в комнату"),
+                "Character: Aria",
+            )
+            record_path = root / "chat_legacy_file.json"
+            wrapper = json.loads(record_path.read_text(encoding="utf-8"))
+            state = wrapper["record"]["session"]["state"]
+            for key in ("provenance", "elapsed_hint", "module_reasons"):
+                state.pop(key, None)
+            for turn in wrapper["record"]["session"]["turns"]:
+                turn.pop("superseded", None)
+            store = first.store
+            wrapper["digest"] = store._record_digest(
+                cast(dict[str, JsonValue], wrapper["record"])
+            )
+            record_path.write_text(json.dumps(wrapper), encoding="utf-8")
+
+            restarted = SessionService(
+                _config(root),
+                provider=ScriptedProvider(_empty_turn_responses()),
+            )
+            status = restarted.control("status", {"session_id": "chat_legacy_file"})
+            self.assertTrue(status["exists"])
+
+    def test_select_profile_applies_provider_before_any_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=ScriptedProvider(_empty_turn_responses()),
+            )
+
+            def profile_check() -> bool:
+                checks = cast(list[JsonValue], service.self_test()["checks"])
+                for check in checks:
+                    if isinstance(check, dict) and check["name"] == "upstream_profile":
+                        return bool(check["ok"])
+                self.fail("upstream_profile check is missing")
+
+            self.assertFalse(profile_check())
+
+            result = service.control(
+                "select_profile",
+                {
+                    "upstream_profile": STProfileConfig(
+                        profile_id="profile-1",
+                        st_base_url="http://127.0.0.1:8000",
+                        source="custom",
+                        api_url="http://127.0.0.1:9000/v1",
+                        model="profile-model",
+                        secret_id="secret-uuid",
+                    ).to_dict(),
+                    "request_delay_seconds": 2,
+                },
+            )
+            self.assertTrue(result["selected"])
+            self.assertTrue(profile_check())
+            # With a profile applied the self-test can finally probe the
+            # upstream instead of skipping the check.
+            checks = cast(list[JsonValue], service.self_test()["checks"])
+            self.assertIn(
+                "upstream_reachable",
+                {check["name"] for check in checks if isinstance(check, dict)},
+            )
+
+    def test_st_managed_runtime_refuses_turn_without_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = replace(
+                _config(Path(temporary)),
+                upstream_base_url="https://api.openai.com/v1",
+                require_upstream_profile=True,
+            )
+            service = SessionService(config, provider=ScriptedProvider(_empty_turn_responses()))
+            with self.assertRaises(SidecarError) as context:
+                service.generate(
+                    _envelope("chat_no_profile", "Я вхожу в комнату"),
+                    _messages("chat_no_profile", "Я вхожу в комнату"),
+                    "Character: Aria",
+                )
+            self.assertEqual(context.exception.code, "upstream_profile_required")
 
     def test_non_loopback_host_header_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
