@@ -46,6 +46,14 @@ function getContext() {
     return SillyTavern.getContext();
 }
 
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+}
+
 function getExtensionName() {
     const path = new URL('.', import.meta.url).pathname;
     return path.split('/').filter(Boolean).at(-1) || 'RoleplayKernel';
@@ -58,6 +66,7 @@ function ensureSettings() {
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
         stored[key] ??= value;
     }
+    stored.model = DEFAULT_SETTINGS.model;
     settings = stored;
     return settings;
 }
@@ -564,6 +573,7 @@ function renderStatus(status) {
         details.textContent = '';
         approve.disabled = true;
         reject.disabled = true;
+        renderHeaderStatus('не подключено', 'offline');
         return;
     }
     const running = status.status === 'running';
@@ -584,6 +594,13 @@ function renderStatus(status) {
     ].filter(Boolean).join(' · ');
     approve.disabled = !status.pending_request_id;
     reject.disabled = !status.pending_request_id;
+    if (!running && status.status !== 'error') {
+        const pending = status.pending_count || 0;
+        renderHeaderStatus(
+            pending > 0 ? `ожидает подтверждения: ${pending}` : 'готова к работе',
+            'ok',
+        );
+    }
 }
 
 const RPK_PHASE_LABELS = {
@@ -598,6 +615,15 @@ const RPK_PHASE_LABELS = {
     idle: 'Kernel свободен',
     error: 'Ошибка запроса',
 };
+
+function renderHeaderStatus(text, state) {
+    const header = document.getElementById('rpk_header_status');
+    if (!header) {
+        return;
+    }
+    header.textContent = text;
+    header.dataset.state = state;
+}
 
 function renderProgress(progress) {
     const card = document.getElementById('rpk_progress')?.closest('.rpk-progress-card');
@@ -635,6 +661,11 @@ function renderProgress(progress) {
             ? progress.message
             : null;
         text.textContent = detail || (active ? 'Запрос выполняется, обновление каждую секунду' : 'Готов к работе');
+    }
+    if (active) {
+        renderHeaderStatus(`${phaseLabel} ${completed}/${total || '?'}`, 'running');
+    } else if (phase === 'error') {
+        renderHeaderStatus('ошибка', 'error');
     }
 }
 
@@ -852,7 +883,6 @@ function bindUi() {
     if (uiReady) {
         return;
     }
-    uiReady = true;
     const sidecarUrl = document.getElementById('rpk_sidecar_url');
     const integrationKey = document.getElementById('rpk_integration_key');
     const model = document.getElementById('rpk_model');
@@ -869,6 +899,34 @@ function bindUi() {
     const approve = document.getElementById('rpk_approve');
     const reject = document.getElementById('rpk_reject');
     const reset = document.getElementById('rpk_reset');
+    const required = {
+        rpk_sidecar_url: sidecarUrl,
+        rpk_integration_key: integrationKey,
+        rpk_model: model,
+        rpk_profile: profile,
+        rpk_mode: mode,
+        rpk_request_delay: requestDelay,
+        rpk_language: language,
+        rpk_auto_route: autoRoute,
+        rpk_launch: launch,
+        rpk_stop: stop,
+        rpk_activate: activate,
+        rpk_disable: disable,
+        rpk_refresh: refresh,
+        rpk_approve: approve,
+        rpk_reject: reject,
+        rpk_reset: reset,
+    };
+    const missing = Object.entries(required)
+        .filter(([, element]) => !element)
+        .map(([id]) => id);
+    if (missing.length) {
+        console.error('[RoleplayKernel] settings panel is missing elements', missing);
+        return;
+    }
+    uiReady = true;
+    model.value = DEFAULT_SETTINGS.model;
+    model.readOnly = true;
     sidecarUrl.value = settings.sidecarUrl;
     integrationKey.value = settings.integrationKey;
     model.value = settings.model;
@@ -893,9 +951,9 @@ function bindUi() {
         saveSettings();
     });
     model.addEventListener('change', () => {
-        settings.model = model.value.trim() || DEFAULT_SETTINGS.model;
-    model.value = DEFAULT_SETTINGS.model;
-    model.readOnly = true;
+        settings.model = DEFAULT_SETTINGS.model;
+        model.value = DEFAULT_SETTINGS.model;
+        model.readOnly = true;
         saveSettings();
     });
     profile.addEventListener('change', () => {
@@ -937,17 +995,90 @@ function bindUi() {
     startProgressPolling();
 }
 
-async function renderUi() {
-    if (uiReady || !document.getElementById('extensions_settings2')) {
+const RPK_PANEL_ID = 'rpk_panel';
+const RPK_RENDER_ATTEMPTS = 20;
+const RPK_RENDER_RETRY_MS = 250;
+
+function expandPanel(holder) {
+    const drawer = holder?.querySelector('.inline-drawer');
+    const content = drawer?.querySelector(':scope > .inline-drawer-content');
+    const icon = drawer?.querySelector(':scope > .inline-drawer-toggle .inline-drawer-icon');
+    if (content) {
+        content.style.display = 'block';
+    }
+    if (icon) {
+        icon.classList.remove('down', 'fa-circle-chevron-down');
+        icon.classList.add('up', 'fa-circle-chevron-up');
+    }
+}
+
+function renderPanelFallback(host, error) {
+    document.getElementById(RPK_PANEL_ID)?.remove();
+    const holder = document.createElement('div');
+    holder.id = RPK_PANEL_ID;
+    holder.className = 'extension_container';
+    holder.innerHTML = `
+        <div class="roleplay-kernel-settings">
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b>Roleplay Kernel</b>
+                    <span class="rpk-header-status" data-state="error">ошибка панели</span>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-up up"></div>
+                </div>
+                <div class="inline-drawer-content" style="display: block;">
+                    <small class="rpk-details">Не удалось загрузить панель настроек: ${escapeHtml(String(error?.message || error))}</small>
+                    <div class="rpk-actions">
+                        <button id="rpk_panel_retry" class="menu-button"><i class="fa-solid fa-rotate"></i><span>Повторить</span></button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    host.appendChild(holder);
+    holder.querySelector('#rpk_panel_retry')?.addEventListener('click', () => {
+        uiReady = false;
+        void renderUi();
+    });
+}
+
+async function renderUi(attempt = 0) {
+    if (uiReady) {
         return;
     }
-    const extensionName = getExtensionName();
-    const html = await getContext().renderExtensionTemplateAsync(
-        `third-party/${extensionName}`,
-        'settings',
-    );
-    document.getElementById('extensions_settings2').insertAdjacentHTML('beforeend', html);
-    bindUi();
+    const host = document.getElementById('extensions_settings2');
+    if (!host) {
+        if (attempt < RPK_RENDER_ATTEMPTS) {
+            window.setTimeout(() => void renderUi(attempt + 1), RPK_RENDER_RETRY_MS);
+        } else {
+            console.error('[RoleplayKernel] container extensions_settings2 not found');
+        }
+        return;
+    }
+    try {
+        const extensionName = getExtensionName();
+        const html = await getContext().renderExtensionTemplateAsync(
+            `third-party/${extensionName}`,
+            'settings',
+        );
+        if (typeof html !== 'string' || !html.trim()) {
+            throw new Error('ST returned an empty settings template');
+        }
+        document.getElementById(RPK_PANEL_ID)?.remove();
+        const holder = document.createElement('div');
+        holder.id = RPK_PANEL_ID;
+        holder.className = 'extension_container';
+        holder.innerHTML = html;
+        host.appendChild(holder);
+        expandPanel(holder);
+        bindUi();
+    } catch (error) {
+        console.error('[RoleplayKernel] failed to render settings panel', error);
+        if (attempt < 3) {
+            window.setTimeout(() => void renderUi(attempt + 1), 500);
+            return;
+        }
+        uiReady = true;
+        renderPanelFallback(host, error);
+    }
 }
 
 function registerEvents() {
@@ -1012,9 +1143,10 @@ export function onActivate() {
     ensureSettings();
     registerEvents();
     const context = getContext();
-    context.eventSource.on(context.eventTypes.APP_READY, () => {
-        void renderUi();
-    });
+    const render = () => void renderUi();
+    context.eventSource.on(context.eventTypes.APP_READY, render);
+    context.eventSource.on(context.eventTypes.EXTENSION_SETTINGS_LOADED, render);
+    render();
 }
 
 export function onInstall() {
