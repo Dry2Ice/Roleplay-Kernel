@@ -38,7 +38,7 @@ from .providers import (
 )
 from .utils import ProviderError
 
-SIDECAR_VERSION = "0.1.0"
+SIDECAR_VERSION = "0.1.1"
 PROTOCOL_VERSION = 1
 ENVELOPE_PREFIX = "[ROLEPLAY_KERNEL_ENVELOPE_V1]"
 CONTROL_PREFIX = "[ROLEPLAY_KERNEL_CONTROL_V1]"
@@ -1084,10 +1084,48 @@ class SessionService:
                 raise SidecarError("transcript_mismatch", "invalid transcript ordering", 409)
 
 
+class AuthThrottle:
+    """Blocks an address after repeated failed authentications.
+
+    The sidecar is a loopback service protected only by an integration key, so
+    unlimited guessing from another local process must not be possible.
+    """
+
+    def __init__(self, *, limit: int = 10, window_seconds: float = 60.0) -> None:
+        self._limit = limit
+        self._window = window_seconds
+        self._failures: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def record_failure(self, address: str, now: float) -> int:
+        with self._lock:
+            bucket = self._failures.setdefault(address, [])
+            cutoff = now - self._window
+            bucket[:] = [stamp for stamp in bucket if stamp > cutoff]
+            bucket.append(now)
+            if len(bucket) > self._limit:
+                # Keep the bucket bounded; the address is blocked anyway.
+                del bucket[: len(bucket) - self._limit - 1]
+            return len(bucket)
+
+    def blocked(self, address: str, now: float) -> bool:
+        with self._lock:
+            bucket = self._failures.get(address)
+            if not bucket:
+                return False
+            cutoff = now - self._window
+            return len([stamp for stamp in bucket if stamp > cutoff]) > self._limit
+
+    def reset(self, address: str) -> None:
+        with self._lock:
+            self._failures.pop(address, None)
+
+
 class SidecarApplication:
     def __init__(self, config: SidecarConfig, service: KernelServiceProtocol) -> None:
         self.config = config
         self.service = service
+        self.throttle = AuthThrottle()
 
     def chat_completion(self, payload: dict[str, JsonValue]) -> tuple[dict[str, JsonValue], bool]:
         model = _required_string(payload, "model")
@@ -1131,6 +1169,34 @@ class SidecarApplication:
             return False
         return hmac.compare_digest(token.strip(), self.config.integration_key)
 
+    def host_header_allowed(self, host: str | None) -> bool:
+        """Reject requests whose Host header is not a loopback authority.
+
+        Without this check a browser page on any origin can reach the loopback
+        sidecar through DNS rebinding, because the request would carry an
+        attacker-controlled Host while still targeting 127.0.0.1.
+        """
+        if not host:
+            return False
+        value = host.strip()
+        if not value:
+            return False
+        if value.startswith("["):
+            closing = value.find("]")
+            if closing < 0:
+                return False
+            hostname = value[1:closing]
+            remainder = value[closing + 1 :]
+            if remainder and not remainder.startswith(":"):
+                return False
+        else:
+            hostname, separator, port = value.rpartition(":")
+            if not separator or not port.isdigit():
+                hostname = value
+        if not hostname:
+            return False
+        return _is_loopback(hostname)
+
 
 class SidecarRequestHandler(BaseHTTPRequestHandler):
     server_version = f"RoleplayKernel/{SIDECAR_VERSION}"
@@ -1156,19 +1222,47 @@ class SidecarRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
             self.send_header("Access-Control-Max-Age", "600")
 
+    def _client_address(self) -> str:
+        address = self.client_address[0] if self.client_address else "unknown"
+        return str(address)
+
+    def _guard_request(self) -> bool:
+        if not self.application.host_header_allowed(self.headers.get("Host")):
+            self._send_error_json(421, "invalid_host", "Host header is not a loopback authority")
+            return False
+        if self.application.throttle.blocked(self._client_address(), time.monotonic()):
+            self._send_error_json(
+                429,
+                "too_many_attempts",
+                "too many failed authentication attempts",
+            )
+            return False
+        return True
+
+    def _require_auth(self) -> bool:
+        if not self.application.authenticated(self.headers.get("Authorization")):
+            self.application.throttle.record_failure(self._client_address(), time.monotonic())
+            self._send_error_json(401, "unauthorized", "invalid integration key")
+            return False
+        self.application.throttle.reset(self._client_address())
+        return True
+
     def do_OPTIONS(self) -> None:
+        if not self._guard_request():
+            return
         self.send_response(204)
         self._send_cors_headers()
         self.end_headers()
 
     def do_GET(self) -> None:
+        if not self._guard_request():
+            return
         path = urlsplit(self.path).path
         if path == "/health":
             self._send_json(200, self.application.service.health())
             return
         if path == "/v1/models":
-            if not self.application.authenticated(self.headers.get("Authorization")):
-                self._send_error_json(401, "unauthorized", "invalid integration key")
+            if not self._require_auth():
                 return
             self._send_json(
                 200,
@@ -1187,11 +1281,12 @@ class SidecarRequestHandler(BaseHTTPRequestHandler):
         self._send_error_json(404, "not_found", "route not found")
 
     def do_POST(self) -> None:
+        if not self._guard_request():
+            return
         if urlsplit(self.path).path != "/v1/chat/completions":
             self._send_error_json(404, "not_found", "route not found")
             return
-        if not self.application.authenticated(self.headers.get("Authorization")):
-            self._send_error_json(401, "unauthorized", "invalid integration key")
+        if not self._require_auth():
             return
         try:
             payload = self._read_payload()

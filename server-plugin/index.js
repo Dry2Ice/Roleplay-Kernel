@@ -13,10 +13,16 @@ const RUNTIME_SETTINGS_PATH = path.join(PLUGIN_ROOT, 'runtime.json');
 const DATA_ROOT = process.env.RPK_DATA_DIR || path.join(PLUGIN_ROOT, 'data');
 const DEFAULT_CONFIG_PATH = path.join(DATA_ROOT, 'config.json');
 const DEFAULT_PORT = 8787;
+const HEALTH_INTERVAL_MS = 5000;
+const HEALTH_FAILURES_BEFORE_RESTART = 3;
 
 let child = null;
 let starting = null;
 let activeRuntime = null;
+let watchdog = null;
+let consecutiveHealthFailures = 0;
+let desiredRunning = false;
+let restartCount = 0;
 
 function runtimeSettings() {
     return readJson(RUNTIME_SETTINGS_PATH) || {};
@@ -198,7 +204,54 @@ function runtimeStatus() {
         pid: running ? child.pid : null,
         port: activeRuntime?.port || null,
         sidecar_url: activeRuntime?.sidecarUrl || null,
+        desired_running: desiredRunning,
+        restarts: restartCount,
     };
+}
+
+function stopWatchdog() {
+    if (watchdog) {
+        clearInterval(watchdog);
+        watchdog = null;
+    }
+}
+
+function startWatchdog() {
+    stopWatchdog();
+    watchdog = setInterval(async () => {
+        if (!desiredRunning) {
+            return;
+        }
+        if (!child || child.exitCode !== null) {
+            consecutiveHealthFailures += 1;
+        } else {
+            try {
+                const health = await requestHealth(activeRuntime?.port, 750);
+                consecutiveHealthFailures = health?.service === 'roleplay-kernel-sidecar' ? 0 : consecutiveHealthFailures + 1;
+            } catch {
+                consecutiveHealthFailures += 1;
+            }
+        }
+        if (consecutiveHealthFailures < HEALTH_FAILURES_BEFORE_RESTART) {
+            return;
+        }
+        consecutiveHealthFailures = 0;
+        console.error(`[${PLUGIN_ID}] runtime unhealthy, restarting`);
+        try {
+            if (child && child.exitCode === null) {
+                child.kill();
+            }
+            child = null;
+            activeRuntime = null;
+            await launchRuntime();
+            restartCount += 1;
+        } catch (error) {
+            console.error(`[${PLUGIN_ID}] runtime restart failed: ${String(error.message || error)}`);
+        }
+    }, HEALTH_INTERVAL_MS);
+    if (typeof watchdog.unref === 'function') {
+        watchdog.unref();
+    }
 }
 
 async function launchRuntime() {
@@ -209,6 +262,7 @@ async function launchRuntime() {
         return starting;
     }
     starting = (async () => {
+        desiredRunning = true;
         const port = await findFreePort();
         const selectedConfigPath = configPath();
         const config = buildConfig(port);
@@ -245,6 +299,8 @@ async function launchRuntime() {
             activeRuntime = null;
             throw error;
         }
+        consecutiveHealthFailures = 0;
+        startWatchdog();
         return {
             ...runtimeStatus(),
             integration_key: config.integration_key,
@@ -259,6 +315,9 @@ async function launchRuntime() {
 }
 
 function stopRuntime() {
+    desiredRunning = false;
+    stopWatchdog();
+    consecutiveHealthFailures = 0;
     if (child && child.exitCode === null) {
         child.kill();
     }
@@ -280,6 +339,15 @@ async function init(router) {
     });
     router.post('/stop', (_request, response) => {
         response.json(stopRuntime());
+    });
+    router.post('/restart', async (_request, response) => {
+        try {
+            stopRuntime();
+            restartCount += 1;
+            response.json(await launchRuntime());
+        } catch (error) {
+            response.status(500).json({ error: String(error.message || error) });
+        }
     });
 }
 

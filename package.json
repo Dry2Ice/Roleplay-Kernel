@@ -1,0 +1,16 @@
+{
+  "name": "roleplay-kernel",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Dev-only tooling for the Roleplay Kernel ST extension (lint and DOM tests).",
+  "type": "module",
+  "devDependencies": {
+    "eslint": "^9.15.0",
+    "globals": "^17.12.0",
+    "jsdom": "^25.0.1"
+  },
+  "scripts": {
+    "lint": "eslint index.js server-plugin/index.js tests/js",
+    "test": "node --test \"tests/js/*.test.mjs\""
+  }
+}

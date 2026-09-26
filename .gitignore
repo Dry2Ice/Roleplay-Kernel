@@ -13,3 +13,5 @@ state/
 server-plugin/data/
 server-plugin/runtime.json
 server-plugin/runtime/
+node_modules/
+package-lock.json

@@ -4,6 +4,7 @@ const ENVELOPE_PREFIX = '[ROLEPLAY_KERNEL_ENVELOPE_V1]';
 const CONTROL_PREFIX = '[ROLEPLAY_KERNEL_CONTROL_V1]';
 const CONTROL_MODEL_PREFIX = 'roleplay-kernel-control/';
 const RUNTIME_PLUGIN_ID = 'roleplay-kernel';
+const EXTENSION_VERSION = '0.1.1';
 const SUPPORTED_GENERATIONS = new Set(['normal', 'regenerate', 'swipe']);
 const SUPPORTED_PROFILE_SOURCES = new Set(['openai', 'custom']);
 const SAMPLING_FIELDS = [
@@ -41,6 +42,7 @@ let uiReady = false;
 const statusRequests = new Map();
 let progressTimer = null;
 let verifiedSidecarBase = null;
+let versionWarningShown = null;
 let consecutiveStatusFailures = 0;
 
 function getContext() {
@@ -500,6 +502,26 @@ async function stopRuntime() {
     }
 }
 
+function checkVersionCompatibility(health) {
+    const reported = typeof health?.version === 'string' ? health.version : null;
+    if (!reported || reported === EXTENSION_VERSION) {
+        return;
+    }
+    const message = `Roleplay Kernel: extension ${EXTENSION_VERSION} but sidecar ${reported}. `
+        + 'Re-run the installer to update the sidecar.';
+    const banner = document.getElementById('rpk_version');
+    if (banner) {
+        banner.textContent = `v${EXTENSION_VERSION} · sidecar v${reported}`;
+        banner.dataset.state = 'mismatch';
+    }
+    if (versionWarningShown === message) {
+        return;
+    }
+    versionWarningShown = message;
+    console.warn(message);
+    toastr.warning(message);
+}
+
 async function assertSidecarIdentity(force = false) {
     const configuredUrl = validateSidecarUrl(settings.sidecarUrl);
     const baseUrl = configuredUrl.replace(/\/v1$/, '');
@@ -525,6 +547,7 @@ async function assertSidecarIdentity(force = false) {
             + `(service=${data?.service || 'no response'})`,
         );
     }
+    checkVersionCompatibility(data);
     verifiedSidecarBase = baseUrl;
     return configuredUrl;
 }
@@ -585,6 +608,9 @@ function renderStatus(status) {
     version.textContent = running
         ? `v${status.version || '—'} · state ${status.state_version > 0 ? status.state_version : '—'}`
         : `v${status.version || '—'} · state ${status.state_version || 0}`;
+    if (versionWarningShown === null) {
+        delete version.dataset.state;
+    }
     const findings = Array.isArray(status.findings) ? status.findings : [];
     const hard = findings.filter(item => item?.severity === 'hard').length;
     details.textContent = [

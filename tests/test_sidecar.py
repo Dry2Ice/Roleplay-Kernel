@@ -486,6 +486,74 @@ class SidecarTests(unittest.TestCase):
             self.assertEqual(turn.pending_request_id, None)
             self.assertEqual(turn.status, "ok")
 
+    def test_non_loopback_host_header_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = _config(Path(temporary))
+            server = create_server(config, SessionService(config, provider=_pending_provider()))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host_value, port_value = server.server_address[:2]
+            host = host_value.decode("utf-8") if isinstance(host_value, bytes) else host_value
+            port = int(port_value)
+            try:
+                request = urllib.request.Request(
+                    f"http://{host}:{port}/v1/chat/completions",
+                    data=b"{}",
+                    method="POST",
+                    headers={"Host": "evil.example.com", "Content-Type": "application/json"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as context:
+                    urllib.request.urlopen(request, timeout=2)
+                self.assertEqual(context.exception.code, 421)
+                context.exception.close()
+
+                allowed = urllib.request.Request(
+                    f"http://{host}:{port}/health",
+                    headers={"Host": f"127.0.0.1:{port}"},
+                )
+                with urllib.request.urlopen(allowed, timeout=2) as response:
+                    self.assertEqual(json.loads(response.read())["status"], "ok")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_repeated_auth_failures_are_throttled(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = _config(Path(temporary))
+            server = create_server(config, SessionService(config, provider=_pending_provider()))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host_value, port_value = server.server_address[:2]
+            host = host_value.decode("utf-8") if isinstance(host_value, bytes) else host_value
+            port = int(port_value)
+            base_url = f"http://{host}:{port}"
+            try:
+                codes: list[int] = []
+                for _ in range(14):
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/chat/completions",
+                        data=b"{}",
+                        method="POST",
+                    )
+                    try:
+                        urllib.request.urlopen(request, timeout=2)
+                        codes.append(200)
+                    except urllib.error.HTTPError as error:
+                        codes.append(error.code)
+                        error.close()
+                self.assertIn(401, codes)
+                self.assertEqual(codes[-1], 429)
+                # A valid key must not bypass the throttle, but it must reset it.
+                self.assertTrue(
+                    all(code == 401 for code in codes[:11]),
+                    f"expected only 401 before the limit, got {codes[:11]}",
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     def test_openai_endpoint_supports_auth_and_control_tunnel(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config = _config(Path(temporary), integration_key=TEST_INTEGRATION_KEY)

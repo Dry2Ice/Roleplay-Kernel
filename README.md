@@ -70,11 +70,31 @@ python -m roleplay_kernel.sidecar --config .\config.json
 - Sampler-level control отсутствует; следующий adapter предназначен для `vLLM` или `llama.cpp`.
 - Sidecar process по умолчанию разрешён только на loopback; для удалённого доступа нужен отдельный TLS reverse proxy.
 - UI-extension сам по себе не может установить server plugin; полная версия требует один запуск installer, после чего запуск выполняется кнопкой.
+- Endpoint `POST /api/plugins/roleplay-kernel/restart` перезапускает runtime принудительно.
 - Плагин совместим с release line SillyTavern `1.19.x`; `minimum_client_version` зафиксирован в manifest.
 
 ## Безопасность
 
-Sidecar слушает `127.0.0.1` по умолчанию, но integration key обязателен для generation и control endpoints даже на loopback. Не публикуйте sidecar в интернет и не храните upstream API key в `config.json`.
+- Sidecar слушает `127.0.0.1` по умолчанию, но integration key обязателен для generation и control endpoints даже на loopback. Не публикуйте sidecar в интернет и не храните upstream API key в `config.json`.
+- Sidecar отклоняет запросы с не-loopback заголовком `Host` (защита от DNS-rebinding через браузер) и блокирует адрес после 10 неудачных авторизаций в минуту.
+- Server plugin перезапускает упавший runtime автоматически: каждые 5 секунд проверяется `/health`, после трёх неудач подряд процесс перезапускается, а счётчик перезапусков виден в `/api/plugins/roleplay-kernel/status`.
+- Extension сверяет версию sidecar по `/health` и показывает предупреждение, если версии расходятся.
+
+## Разработка
+
+```
+pip install -e '.[dev]'
+npm install
+
+ruff check .
+mypy src tests
+python -m unittest discover -s tests -q
+npm run lint      # ESLint, sourceType: module
+npm test          # jsdom-тесты панели и регрессий
+```
+
+План работ и контрольные точки поставки — в `ROADMAP.md`. Скрипт `scripts/bump_version.py`
+поднимает версию в `pyproject.toml`, `manifest.json` и `sidecar.py` одновременно.
 
 ## Лицензия
 
