@@ -243,6 +243,154 @@ class SidecarTests(unittest.TestCase):
             )
             self.assertFalse(drifted["transcript_matches"])
 
+    def test_transcript_drift_resyncs_instead_of_failing_the_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=ScriptedProvider(_empty_turn_responses() * 3),
+            )
+            first = _envelope_with_history(
+                "chat_drift",
+                [("user", "Первый ход"), ("assistant", "Колено горело.")],
+            )
+            service.generate(first, _messages_for_envelope(first), "Character: Aria")
+            second = _envelope_with_history(
+                "chat_drift",
+                [
+                    ("user", "Первый ход"),
+                    ("assistant", "Колено горело."),
+                    ("user", "Второй ход"),
+                    ("assistant", "Вокруг была пустая станция."),
+                ],
+            )
+            service.generate(second, _messages_for_envelope(second), "Character: Aria")
+            drifted = _envelope_with_history(
+                "chat_drift",
+                [
+                    ("user", "Первый ход"),
+                    ("assistant", "Совершенно другой ответ"),
+                    ("user", "Второй ход"),
+                    ("assistant", "Вокруг была пустая станция."),
+                ],
+            )
+            turn = service.generate(
+                drifted,
+                _messages_for_envelope(drifted),
+                "Character: Aria",
+            )
+
+            self.assertEqual(turn.status, "ok")
+            status = service.control("status", {"session_id": "chat_drift"})
+            self.assertTrue(status["transcript_reconciled"])
+
+    def test_transcript_truncation_resyncs_to_shorter_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=ScriptedProvider(_empty_turn_responses() * 3),
+            )
+            first = _envelope_with_history(
+                "chat_trunc",
+                [("user", "Первый ход"), ("assistant", "Колено горело.")],
+            )
+            service.generate(first, _messages_for_envelope(first), "Character: Aria")
+            second = _envelope_with_history(
+                "chat_trunc",
+                [
+                    ("user", "Первый ход"),
+                    ("assistant", "Колено горело."),
+                    ("user", "Второй ход"),
+                    ("assistant", "Вокруг была пустая станция."),
+                ],
+            )
+            service.generate(second, _messages_for_envelope(second), "Character: Aria")
+            truncated = _envelope_with_history(
+                "chat_trunc",
+                [("user", "Первый ход"), ("assistant", "Колено горело.")],
+            )
+            turn = service.generate(
+                truncated,
+                _messages_for_envelope(truncated),
+                "Character: Aria",
+            )
+            self.assertEqual(turn.status, "ok")
+            self.assertTrue(
+                service.control("status", {"session_id": "chat_trunc"})[
+                    "transcript_reconciled"
+                ]
+            )
+
+    def test_completely_unrelated_transcript_is_reconciled_without_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=ScriptedProvider(_empty_turn_responses() * 2),
+            )
+            first = _envelope_with_history(
+                "chat_alien",
+                [("user", "Первый ход"), ("assistant", "Колено горело.")],
+            )
+            service.generate(first, _messages_for_envelope(first), "Character: Aria")
+            alien = _envelope_with_history(
+                "chat_alien",
+                [("user", "Совсем другой вопрос"), ("assistant", "Иной ответ")],
+            )
+            turn = service.generate(
+                alien,
+                _messages_for_envelope(alien),
+                "Character: Aria",
+            )
+            self.assertEqual(turn.status, "ok")
+            status = service.control("status", {"session_id": "chat_alien"})
+            self.assertTrue(status["transcript_reconciled"])
+
+    def test_reconciled_history_persists_and_stays_consistent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = _config(Path(temporary))
+            provider = ScriptedProvider(_empty_turn_responses() * 3)
+            service = SessionService(config, provider=provider)
+            first = _envelope_with_history(
+                "chat_persist",
+                [("user", "Первый ход"), ("assistant", "Колено горело.")],
+            )
+            service.generate(first, _messages_for_envelope(first), "Character: Aria")
+            alien = _envelope_with_history(
+                "chat_persist",
+                [
+                    ("user", "Совсем другой вопрос"),
+                    ("assistant", "Вокруг была пустая станция."),
+                    ("user", "Новый ход"),
+                    ("assistant", "Вокруг была пустая станция."),
+                ],
+            )
+            service.generate(alien, _messages_for_envelope(alien), "Character: Aria")
+
+            restarted = SessionService(config, provider=ScriptedProvider(_empty_turn_responses()))
+            status = restarted.control("status", {"session_id": "chat_persist"})
+            self.assertTrue(status["exists"])
+            self.assertTrue(
+                restarted.control(
+                    "status",
+                    {
+                        "session_id": "chat_persist",
+                        "transcript": cast(
+                            JsonValue,
+                            [
+                                {"index": index, "role": role, "content": content}
+                                for index, (role, content) in enumerate(
+                                    [
+                                        ("user", "Совсем другой вопрос"),
+                                        ("assistant", "Вокруг была пустая станция."),
+                                        ("user", "Новый ход"),
+                                        ("assistant", "Вокруг была пустая станция."),
+                                    ]
+                                )
+                            ],
+                        ),
+                    },
+                )["transcript_matches"]
+            )
+
     def test_normal_request_is_idempotent_while_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             provider = _pending_provider()
@@ -606,6 +754,36 @@ def _messages(
         )
     )
     return messages
+
+
+def _messages_for_envelope(envelope: GenerationEnvelope) -> list[IncomingMessage]:
+    envelope_data = envelope.to_dict()
+    envelope_data["operation"] = "generate"
+    return [
+        IncomingMessage("system", "Character: Aria. Setting: an abandoned station."),
+        IncomingMessage("system", ENVELOPE_PREFIX + json.dumps(envelope_data)),
+        IncomingMessage("user", "текущий ход"),
+    ]
+
+
+def _envelope_with_history(
+    session_id: str,
+    history: Sequence[tuple[str, str]],
+) -> GenerationEnvelope:
+    transcript = [
+        TranscriptItem(index, role, content)
+        for index, (role, content) in enumerate(history)
+    ]
+    return GenerationEnvelope(
+        protocol=PROTOCOL_VERSION,
+        session_id=session_id,
+        generation_type="normal",
+        request_key=_new_request_key(),
+        language="ru",
+        pov="third_person_limited",
+        tense="past",
+        transcript=tuple(transcript),
+    )
 
 
 def _message_dicts(messages: list[IncomingMessage]) -> list[dict[str, str]]:

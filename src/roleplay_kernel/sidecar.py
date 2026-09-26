@@ -652,6 +652,7 @@ class SessionService:
         self._generation_lock = threading.RLock()
         self._active_lock = threading.Lock()
         self._active_session_id: str | None = None
+        self._reconciled_sessions: set[str] = set()
         self.engine = Engine(
             self.provider,
             compiler=ContextCompiler(token_budget=config.token_budget),
@@ -773,7 +774,9 @@ class SessionService:
                     409,
                 )
             conversation, user_input = _transcript_exchange(envelope.transcript)
-            self._sync_transcript(record.session, conversation)
+            self._reconciled_sessions.discard(envelope.session_id)
+            if self._sync_transcript(record.session, conversation):
+                self._reconciled_sessions.add(envelope.session_id)
             record.checkpoint = record.session.to_dict()
             with self._generation_lock:
                 self._apply_mode(envelope.mode)
@@ -992,6 +995,7 @@ class SessionService:
             "active_modules": [],
             "findings": [],
             "context_hash": None,
+            "transcript_reconciled": False,
         }
 
     def _status(
@@ -1008,6 +1012,7 @@ class SessionService:
                 "pending_request_id": None,
                 "last_result": {},
                 "progress": self.engine.progress,
+                "transcript_reconciled": session_id in self._reconciled_sessions,
             }
         last_result = record.last_result or {}
         pending_value = last_result.get("pending_operations")
@@ -1032,32 +1037,38 @@ class SessionService:
             "active_modules": last_result.get("active_modules", []),
             "findings": last_result.get("findings", []),
             "context_hash": record.context_hash,
+            "transcript_reconciled": session_id in self._reconciled_sessions,
         }
 
     def _sync_transcript(
         self,
         session: Session,
         incoming: list[tuple[str, str]],
-    ) -> None:
+    ) -> bool:
+        """Append any missing authoritative turns from the ST transcript.
+
+        Returns True when the kernel history was stale and new turns had to be
+        appended. Turns are never removed: the ledger references them, so the
+        only safe reconciliation is additive.
+        """
         existing = [(turn.role, turn.content) for turn in session.turns]
         existing_keys = [(role, _message_identity(content)) for role, content in existing]
         incoming_keys = [(role, _message_identity(content)) for role, content in incoming]
         if incoming_keys == existing_keys:
-            return
-        if len(incoming) > len(existing) and incoming_keys[: len(existing)] == existing_keys:
-            suffix = incoming[len(existing) :]
-            self._validate_pairs(suffix)
-            for role, content in suffix:
-                session.append_turn(cast(Literal["user", "assistant"], role), content)
-            return
+            return False
         shorter = len(incoming)
         if shorter and existing_keys[-shorter:] == incoming_keys:
-            return
-        raise SidecarError(
-            "transcript_mismatch",
-            "SillyTavern transcript no longer matches the kernel session",
-            409,
-        )
+            return False
+        if len(incoming) > len(existing) and incoming_keys[: len(existing)] == existing_keys:
+            suffix = incoming[len(existing) :]
+        else:
+            # The chat diverged (edit, deletion, swipe, or history produced
+            # outside the kernel). Append the authoritative history verbatim.
+            suffix = incoming
+        self._validate_pairs(suffix)
+        for role, content in suffix:
+            session.append_turn(cast(Literal["user", "assistant"], role), content)
+        return True
 
     @staticmethod
     def _validate_pairs(items: list[tuple[str, str]]) -> None:

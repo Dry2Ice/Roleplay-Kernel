@@ -719,6 +719,13 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
             saveChatBinding();
             renderStatus(status);
             renderProgress(status.progress);
+            if (status.transcript_reconciled && !current.reconciledNotified) {
+                current.reconciledNotified = true;
+                saveChatBinding();
+                toastr.info(
+                    'Roleplay Kernel: история чата была изменена вне ядра, ядро синхронизировано с SillyTavern.',
+                );
+            }
             consecutiveStatusFailures = 0;
             if (!silent) {
                 toastr.success('Roleplay Kernel подключён');
