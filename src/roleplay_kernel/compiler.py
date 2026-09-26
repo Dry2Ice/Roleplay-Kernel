@@ -9,6 +9,7 @@ from typing import Literal, cast
 
 from .models import ConversationTurn, JsonValue, RoleplayState, StateDelta
 from .modules import ModuleActivation
+from .relevance import RelevanceWeights, score_entry, tokenize
 
 PromptKind = Literal["plan", "render", "extract", "critic", "repair"]
 
@@ -44,11 +45,15 @@ class ContextCompiler:
         token_budget: int = 6000,
         max_recent_turns: int = 12,
         token_estimator: Callable[[str], int] | None = None,
+        relevance_threshold: float = 0.0,
+        relevance_weights: RelevanceWeights | None = None,
     ) -> None:
         if token_budget < 512:
             raise ValueError("token_budget must be at least 512")
         if max_recent_turns < 2:
             raise ValueError("max_recent_turns must be at least 2")
+        if not 0.0 <= relevance_threshold <= 1.0:
+            raise ValueError("relevance_threshold must be between 0 and 1")
         if token_estimator is not None:
             probe = token_estimator("probe")
             if isinstance(probe, bool) or not isinstance(probe, int) or probe < 1:
@@ -56,6 +61,8 @@ class ContextCompiler:
         self.token_budget = token_budget
         self.max_recent_turns = max_recent_turns - max_recent_turns % 2
         self._token_estimator = token_estimator or estimate_tokens
+        self.relevance_threshold = relevance_threshold
+        self._relevance_weights = relevance_weights or RelevanceWeights()
 
     def compile_plan(
         self,
@@ -166,7 +173,11 @@ class ContextCompiler:
         style_constraints: Mapping[str, list[str]] | None = None,
     ) -> PromptPack:
         system = _critic_system(state.language, _render_modules(activations))
-        slice_data = _relevant_state_slice(state, candidate, plan)
+        slice_data = _relevant_state_slice(
+            state, candidate, plan,
+            threshold=self.relevance_threshold,
+            weights=self._relevance_weights,
+        )
         style_section = _style_constraints_section(style_constraints)
         user = (
             f"RELEVANT_STATE_DATA\n{_json(slice_data)}\n\n"
@@ -202,8 +213,13 @@ class ContextCompiler:
     ) -> PromptPack:
         system = _repair_system(state.language, _render_modules(activations))
         excerpts = _flagged_excerpts(candidate, findings)
+        slice_data = _relevant_state_slice(
+            state, candidate, plan,
+            threshold=self.relevance_threshold,
+            weights=self._relevance_weights,
+        )
         user = (
-            f"RELEVANT_STATE_DATA\n{_json(_relevant_state_slice(state, candidate, plan))}\n\n"
+            f"RELEVANT_STATE_DATA\n{_json(slice_data)}\n\n"
             f"{_voice_section(external_context)}"
             f"{_external_context_section(external_context)}"
             f"APPROVED_PLAN_DATA\n{_json(plan)}\n\n"
@@ -487,23 +503,29 @@ def _relevant_state_slice(
     state: RoleplayState,
     candidate: str,
     plan: dict[str, JsonValue],
+    *,
+    threshold: float = 0.0,
+    weights: RelevanceWeights | None = None,
 ) -> dict[str, JsonValue]:
-    """Keep the state entries the critic can actually check against this post.
+    effective_weights = weights or RelevanceWeights()
+    candidate_tokens = tokenize(candidate)
+    plan_tokens = tokenize(_json(plan))
 
-    Sending the whole state makes the critic weigh distant trivia against the
-    scene in front of it. A lexical slice keeps canon that the candidate or the
-    approved plan actually touches, plus the always-current frame.
-    """
-    haystack = f"{candidate}\n{_json(plan)}".casefold()
-    tokens = {token for token in _WORD_RE.findall(haystack) if len(token) > 2}
-    tokens -= _STOPWORDS
+    def score(text: str, recency: float) -> float:
+        return score_entry(
+            text,
+            recency=recency,
+            candidate_tokens=candidate_tokens,
+            plan_tokens=plan_tokens,
+            weights=effective_weights,
+        )
 
     def relevant(mapping: dict[str, str]) -> dict[str, str]:
         picked: dict[str, str] = {}
         for key, value in mapping.items():
-            key_tokens = {token.casefold() for token in _WORD_RE.findall(key)}
-            value_tokens = {token.casefold() for token in _WORD_RE.findall(value)}
-            if (key_tokens | value_tokens) & tokens:
+            text = f"{key} {value}"
+            recency = 0.5 if state.provenance.get(key) else 0.2
+            if score(text, recency) >= threshold:
                 picked[key] = value
         return picked
 
@@ -522,18 +544,23 @@ def _relevant_state_slice(
             JsonValue,
             relevant(getattr(state, category)),
         )
-    if tokens:
-        slice_data["beliefs"] = [
-            belief.to_dict()
-            for belief in state.beliefs[-12:]
-            if tokens & {token.casefold() for token in _WORD_RE.findall(belief.proposition)}
-        ]
+    if state.beliefs:
+        scored_beliefs: list[dict[str, JsonValue]] = []
+        for index, belief in enumerate(state.beliefs):
+            text = f"{belief.holder} {belief.proposition}"
+            recency = 0.6 + 0.4 * (index + 1) / len(state.beliefs)
+            if score(text, min(1.0, recency)) >= threshold:
+                scored_beliefs.append(belief.to_dict())
+        slice_data["beliefs"] = cast(JsonValue, scored_beliefs[-12:])
     if state.scene_tags:
         slice_data["scene_tags"] = list(state.scene_tags[-6:])
     if state.events:
-        slice_data["events"] = [
-            value[-200:] for value in state.events[-3:]
-        ]
+        scored_events: list[str] = []
+        for index, event in enumerate(state.events):
+            recency = 0.5 + 0.5 * (index + 1) / len(state.events)
+            if score(event, min(1.0, recency)) >= threshold:
+                scored_events.append(event[-200:])
+        slice_data["events"] = cast(JsonValue, scored_events[-3:])
     return slice_data
 
 

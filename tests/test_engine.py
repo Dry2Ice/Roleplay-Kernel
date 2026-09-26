@@ -559,7 +559,13 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(engine.metrics.provider_calls, 0)
 
     def test_critic_receives_only_the_relevant_state_slice(self) -> None:
-        engine = Engine(ScriptedProvider([]), config=EngineConfig(mode="lite"))
+        from roleplay_kernel.compiler import ContextCompiler
+
+        engine = Engine(
+            ScriptedProvider([]),
+            config=EngineConfig(mode="lite"),
+            compiler=ContextCompiler(token_budget=6000, relevance_threshold=0.3),
+        )
         session = engine.new_session()
         session._state.facts["the vault code"] = "4711"
         session._state.facts["the harbour patrol"] = "three ships"
