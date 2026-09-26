@@ -585,7 +585,7 @@ function renderStatus(status) {
         ? `v${status.version || '—'} · state ${status.state_version > 0 ? status.state_version : '—'}`
         : `v${status.version || '—'} · state ${status.state_version || 0}`;
     const findings = Array.isArray(status.findings) ? status.findings : [];
-    const hard = findings.filter(item =>?.severity === 'hard').length;
+    const hard = findings.filter(item => item?.severity === 'hard').length;
     details.textContent = [
         status.transcript_matches === false ? 'Транскрипт рассинхронизирован' : null,
         `Режим: ${status.status || 'idle'}`,
