@@ -194,6 +194,8 @@ function buildConfig(port) {
         max_repairs: existing.max_repairs ?? 1,
         max_context_chars: existing.max_context_chars || 16000,
         allow_insecure_http: existing.allow_insecure_http === true,
+        turn_budget_seconds: existing.turn_budget_seconds ?? 300,
+        post_render_grace_seconds: existing.post_render_grace_seconds ?? 90,
     };
 }
 

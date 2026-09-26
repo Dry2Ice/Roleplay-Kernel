@@ -101,6 +101,22 @@ $EffectiveUpstreamBaseUrl = $UpstreamBaseUrl
 $EffectiveUpstreamModel = $UpstreamModel
 $EffectiveApiKeyEnv = $ApiKeyEnv
 $EffectiveAllowInsecureHttp = [bool]$AllowInsecureHttp
+$ConfigDefaults = [ordered]@{
+    host = "127.0.0.1"
+    upstream_token_parameter = "max_tokens"
+    mode = "balanced"
+    context_window = 32768
+    token_budget = 18000
+    max_output_tokens = 8192
+    max_internal_tokens = 4096
+    upstream_timeout_seconds = 600
+    max_repairs = 1
+    max_context_chars = 16000
+    allow_insecure_http = [bool]$AllowInsecureHttp
+    turn_budget_seconds = 300
+    post_render_grace_seconds = 90
+}
+$MergedConfig = $null
 if (Test-Path -LiteralPath $ConfigPath) {
     try {
         $ExistingConfig = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
@@ -120,37 +136,49 @@ if (Test-Path -LiteralPath $ConfigPath) {
             if ($null -ne $ExistingConfig.allow_insecure_http) {
                 $EffectiveAllowInsecureHttp = [bool]$ExistingConfig.allow_insecure_http
             }
+            # Upgrades must add keys introduced by a newer version without
+            # touching values the user already tuned.
+            $AddedNewKeys = $false
+            foreach ($Entry in $ConfigDefaults.GetEnumerator()) {
+                if ($null -eq $ExistingConfig.($Entry.Key)) {
+                    $ExistingConfig | Add-Member -NotePropertyName $Entry.Key -NotePropertyValue $Entry.Value
+                    $AddedNewKeys = $true
+                }
+            }
+            if ($AddedNewKeys) {
+                $MergedConfig = $ExistingConfig
+                $NeedsConfig = $true
+            }
         }
     } catch {
         throw "Existing config is not valid JSON: $ConfigPath"
     }
 }
 if ($NeedsConfig) {
-    $KeyBytes = New-Object byte[] 32
-    $Random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    $Random.GetBytes($KeyBytes)
-    $Random.Dispose()
-    $IntegrationKey = [Convert]::ToBase64String($KeyBytes)
-    $Config = [ordered]@{
-        host = "127.0.0.1"
-        port = $Port
-        upstream_base_url = $UpstreamBaseUrl.TrimEnd("/")
-        upstream_model = $UpstreamModel
-        upstream_api_key_env = $ApiKeyEnv
-        upstream_token_parameter = "max_tokens"
-        integration_key = $IntegrationKey
-        state_dir = (Join-Path $RuntimeRoot "state")
-        mode = "balanced"
-        context_window = 32768
-        token_budget = 18000
-        max_output_tokens = 8192
-        max_internal_tokens = 4096
-        upstream_timeout_seconds = 600
-        max_repairs = 1
-        max_context_chars = 16000
-        allow_insecure_http = [bool]$AllowInsecureHttp
+    if ($MergedConfig) {
+        $ConfigJson = $MergedConfig | ConvertTo-Json -Depth 4
+    } else {
+        $KeyBytes = New-Object byte[] 32
+        $Random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $Random.GetBytes($KeyBytes)
+        $Random.Dispose()
+        $IntegrationKey = [Convert]::ToBase64String($KeyBytes)
+        $Config = [ordered]@{
+            host = $ConfigDefaults["host"]
+            port = $Port
+            upstream_base_url = $UpstreamBaseUrl.TrimEnd("/")
+            upstream_model = $UpstreamModel
+            upstream_api_key_env = $ApiKeyEnv
+            upstream_token_parameter = $ConfigDefaults["upstream_token_parameter"]
+            integration_key = $IntegrationKey
+            state_dir = (Join-Path $RuntimeRoot "state")
+        }
+        foreach ($Entry in $ConfigDefaults.GetEnumerator()) {
+            if ($Entry.Key -eq "host") { continue }
+            $Config[$Entry.Key] = $Entry.Value
+        }
+        $ConfigJson = $Config | ConvertTo-Json -Depth 4
     }
-    $ConfigJson = $Config | ConvertTo-Json -Depth 4
     $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($ConfigPath, $ConfigJson, $Utf8NoBom)
 }

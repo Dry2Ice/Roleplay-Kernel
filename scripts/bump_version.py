@@ -68,6 +68,16 @@ def main() -> None:
             encoding="utf-8",
         )
         print(f"updated: {manifest}")
+
+    package = pathlib.Path("package.json")
+    if package.exists():
+        data = json.loads(package.read_text(encoding="utf-8"))
+        data["version"] = version
+        package.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(f"updated: {package}")
     print("bumped to", version)
 
 

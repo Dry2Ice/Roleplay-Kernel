@@ -18,6 +18,7 @@ from roleplay_kernel.sidecar import (
     CONTROL_PREFIX,
     ENVELOPE_PREFIX,
     PROTOCOL_VERSION,
+    SIDECAR_VERSION,
     GenerationEnvelope,
     IncomingMessage,
     SessionService,
@@ -649,7 +650,7 @@ class SidecarTests(unittest.TestCase):
             self.assertIsInstance(sidecar, dict)
             if not isinstance(sidecar, dict):
                 self.fail("sidecar block must be an object")
-            self.assertEqual(sidecar["version"], "0.2.0")
+            self.assertEqual(sidecar["version"], SIDECAR_VERSION)
             self.assertIn("python", sidecar)
             config = report["config"]
             self.assertIsInstance(config, dict)

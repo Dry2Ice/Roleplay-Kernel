@@ -122,7 +122,7 @@ test('pending state changes render as sentences with accept and reject', async (
                 return {
                     ok: true,
                     status: 200,
-                    json: async () => ({ status: 'ok', service: 'roleplay-kernel-sidecar', version: '0.2.0' }),
+                    json: async () => ({ status: 'ok', service: 'roleplay-kernel-sidecar', version: '0.6.0' }),
                 };
             }
             return {
@@ -133,7 +133,7 @@ test('pending state changes render as sentences with accept and reject', async (
                         message: {
                             content: JSON.stringify({
                                 session_id: 's1',
-                                version: '0.2.0',
+                                version: '0.6.0',
                                 exists: true,
                                 state_version: 3,
                                 pending_request_id: 'r1',
@@ -239,7 +239,7 @@ test('the self-test button renders the check list from the sidecar', async () =>
                     json: async () => ({
                         status: 'ok',
                         service: 'roleplay-kernel-sidecar',
-                        version: '0.2.0',
+                        version: '0.6.0',
                     }),
                 };
             }
