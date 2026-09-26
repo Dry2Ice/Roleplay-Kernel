@@ -566,10 +566,15 @@ function renderStatus(status) {
         reject.disabled = true;
         return;
     }
-    state.textContent = status.exists ? 'Подключено' : 'Сессия ещё не создана';
-    version.textContent = `v${status.version || '—'} · state ${status.state_version || 0}`;
+    const running = status.status === 'running';
+    state.textContent = running
+        ? 'Выполняется запрос'
+        : (status.exists ? 'Подключено' : 'Сессия ещё не создана');
+    version.textContent = running
+        ? `v${status.version || '—'} · state ${status.state_version > 0 ? status.state_version : '—'}`
+        : `v${status.version || '—'} · state ${status.state_version || 0}`;
     const findings = Array.isArray(status.findings) ? status.findings : [];
-    const hard = findings.filter(item => item?.severity === 'hard').length;
+    const hard = findings.filter(item =>?.severity === 'hard').length;
     details.textContent = [
         status.transcript_matches === false ? 'Транскрипт рассинхронизирован' : null,
         `Режим: ${status.status || 'idle'}`,
@@ -581,20 +586,55 @@ function renderStatus(status) {
     reject.disabled = !status.pending_request_id;
 }
 
+const RPK_PHASE_LABELS = {
+    starting: 'Подготовка запроса',
+    plan: 'Планирование сцены',
+    render: 'Генерация ответа модели',
+    extract: 'Извлечение изменений состояния',
+    critic: 'Проверка ответа',
+    repair: 'Исправление ответа',
+    fallback: 'Аварийный ответ без планирования',
+    done: 'Готово',
+    idle: 'Kernel свободен',
+    error: 'Ошибка запроса',
+};
+
 function renderProgress(progress) {
+    const card = document.getElementById('rpk_progress')?.closest('.rpk-progress-card');
     const bar = document.getElementById('rpk_progress_bar');
+    const track = document.getElementById('rpk_progress');
     const text = document.getElementById('rpk_progress_text');
+    const label = document.getElementById('rpk_progress_label');
+    const count = document.getElementById('rpk_progress_count');
     const active = Boolean(progress?.active);
     const completed = Number(progress?.completed) || 0;
     const total = Number(progress?.total) || 0;
     const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+    const phase = typeof progress?.phase === 'string' ? progress.phase : 'idle';
+    const phaseLabel = RPK_PHASE_LABELS[phase] || progress?.message || 'Обработка';
+    if (card) {
+        card.classList.toggle('is-active', active);
+        card.classList.toggle('is-error', phase === 'error');
+    }
     if (bar) {
         bar.style.width = `${percent}%`;
     }
+    if (track) {
+        track.setAttribute('aria-valuenow', String(percent));
+        track.setAttribute('aria-valuetext', `${phaseLabel} (${percent}%)`);
+    }
+    if (label) {
+        label.textContent = phaseLabel;
+    }
+    if (count) {
+        count.textContent = total > 0 ? `${completed}/${total} · ${percent}%` : percent > 0 ? `${percent}%` : '—';
+    }
     if (text) {
-        text.textContent = active
-            ? `${progress?.message || 'Обработка'}: ${completed}/${total || '?'}`
-            : progress?.message || 'Готов к работе';
+        const detail = typeof progress?.message === 'string' && progress.message
+            && progress.message !== phaseLabel
+            ? progress.message
+            : null;
+        text.textContent = detail || (active ? 'Запрос выполняется, обновление каждую секунду' : 'Готов к работе');
     }
 }
 

@@ -439,6 +439,77 @@ class SidecarTests(unittest.TestCase):
             self.assertTrue(any("Новый ход" in prompt for prompt in rendered_prompts))
             self.assertFalse(any("Подмененный" in prompt for prompt in rendered_prompts))
 
+    def test_status_reports_live_progress_while_generation_is_running(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = _BlockingProvider()
+            service = SessionService(_config(Path(temporary)), provider=provider)
+            errors: list[BaseException] = []
+
+            def run_generation() -> None:
+                try:
+                    service.generate(
+                        _envelope("chat_live", "Я вхожу в комнату"),
+                        _messages("chat_live", "Я вхожу в комнату"),
+                        "Character: Aria",
+                    )
+                except BaseException as error:  # pragma: no cover - surfaced via errors
+                    errors.append(error)
+
+            thread = threading.Thread(target=run_generation)
+            thread.start()
+            self.assertTrue(provider.started.wait(timeout=2))
+            try:
+                status = service.control("status", {"session_id": "chat_live"})
+            finally:
+                provider.release.set()
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(status["status"], "running")
+            progress = status["progress"]
+            self.assertIsInstance(progress, dict)
+            if not isinstance(progress, dict):
+                self.fail("progress must be an object")
+            self.assertTrue(progress["active"])
+            self.assertEqual(progress["phase"], "plan")
+            self.assertEqual(progress["completed"], 0)
+            self.assertEqual(progress["total"], 4)
+            idle = service.control("status", {"session_id": "chat_live"})
+            idle_progress = idle["progress"]
+            self.assertIsInstance(idle_progress, dict)
+            if not isinstance(idle_progress, dict):
+                self.fail("progress must be an object")
+            self.assertFalse(idle_progress["active"])
+            self.assertEqual(idle_progress["completed"], 4)
+
+    def test_status_does_not_deadlock_when_a_different_session_is_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = _BlockingProvider()
+            service = SessionService(_config(Path(temporary)), provider=provider)
+            errors: list[BaseException] = []
+
+            def run_generation() -> None:
+                try:
+                    service.generate(
+                        _envelope("chat_busy", "Я вхожу в комнату"),
+                        _messages("chat_busy", "Я вхожу в комнату"),
+                        "Character: Aria",
+                    )
+                except BaseException as error:  # pragma: no cover - surfaced via errors
+                    errors.append(error)
+
+            thread = threading.Thread(target=run_generation)
+            thread.start()
+            self.assertTrue(provider.started.wait(timeout=2))
+            try:
+                other = service.control("status", {"session_id": "chat_other"})
+            finally:
+                provider.release.set()
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(other["exists"], False)
+
 
 def _config(root: Path, *, integration_key: str = TEST_INTEGRATION_KEY) -> SidecarConfig:
     return SidecarConfig(
@@ -559,6 +630,36 @@ def _empty_turn_responses() -> list[Completion]:
         Completion('{"operations": []}', "test-model"),
         Completion('{"findings": []}', "test-model"),
     ]
+
+
+class _BlockingProvider:
+    """Provider that blocks inside the planner call so progress can be observed."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls: list[tuple[ChatMessage, ...]] = []
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
+    ) -> Completion:
+        self.calls.append(tuple(messages))
+        if len(self.calls) == 1:
+            self.started.set()
+            if not self.release.wait(timeout=5):
+                raise AssertionError("planner call was not released")
+            return Completion(_plan_json(), "test-model")
+        if len(self.calls) == 2:
+            return Completion("Вокруг была пустая станция.", "test-model")
+        if len(self.calls) == 3:
+            return Completion('{"operations": []}', "test-model")
+        return Completion('{"findings": []}', "test-model")
 
 
 def _request(

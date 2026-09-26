@@ -5,76 +5,93 @@
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
+            <div class="rpk-section-title">Состояние</div>
             <div class="rpk-status-row">
                 <span id="rpk_status" class="rpk-status">Не подключено</span>
-                <small id="rpk_version"></small>
+                <small id="rpk_version" class="rpk-details"></small>
             </div>
-            <div id="rpk_details" class="rpk-details"></div>
-            <div class="rpk-progress" aria-label="Kernel progress">
-                <div id="rpk_progress_bar" class="rpk-progress-bar"></div>
+            <small id="rpk_details" class="rpk-details"></small>
+            <div class="rpk-progress-card" aria-live="polite">
+                <div class="rpk-progress-head">
+                    <span id="rpk_progress_label" class="rpk-progress-label">Kernel idle</span>
+                    <span id="rpk_progress_count" class="rpk-details">—</span>
+                </div>
+                <div id="rpk_progress" class="rpk-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                    <div id="rpk_progress_bar" class="rpk-progress-bar"></div>
+                </div>
+                <small id="rpk_progress_text" class="rpk-details">Готов к работе</small>
             </div>
-            <small id="rpk_progress_text" class="rpk-details">Готов к работе</small>
+            <small id="rpk_runtime_status" class="rpk-details">Runtime: не запущен</small>
+
+            <div class="rpk-section-title">Runtime</div>
+            <div class="rpk-actions">
+                <button id="rpk_launch" class="menu-button primary"><i class="fa-solid fa-play"></i><span>Запустить</span></button>
+                <button id="rpk_stop" class="menu-button"><i class="fa-solid fa-stop"></i><span>Остановить</span></button>
+                <button id="rpk_refresh" class="menu-button"><i class="fa-solid fa-rotate"></i><span>Обновить</span></button>
+            </div>
+
+            <div class="rpk-section-title">Подключение</div>
             <label class="rpk-field">
-                <span>ST connection profile</span>
+                <span>Профиль ST</span>
                 <select id="rpk_profile">
                     <option value="">Прямой upstream из sidecar config</option>
                 </select>
             </label>
             <small id="rpk_profile_hint" class="rpk-details"></small>
-            <small id="rpk_runtime_status" class="rpk-details">Runtime: не запущен</small>
-            <label class="rpk-field">
-                <span>Sidecar URL</span>
-                <input id="rpk_sidecar_url" type="text" autocomplete="off" />
-            </label>
-            <label class="rpk-field">
-                <span>Integration key</span>
-                <input id="rpk_integration_key" type="password" autocomplete="new-password" />
-            </label>
-            <div class="rpk-grid">
-                <label class="rpk-field">
-                    <span>Kernel model ID (не менять)</span>
-                    <input id="rpk_model" type="text" autocomplete="off" readonly />
-                    <small class="rpk-details">Это идентификатор локального протокола. Реальная модель выбирается в профиле ST.</small>
-                </label>
-                <label class="rpk-field">
-                    <span>Режим Kernel</span>
-                    <select id="rpk_mode">
-                        <option value="balanced">Balanced — полный pipeline</option>
-                        <option value="fast">Fast — render + state extraction</option>
-                        <option value="lite">Lite — один render-вызов</option>
-                    </select>
-                </label>
-                <label class="rpk-field">
-                    <span>Пауза между запросами, сек</span>
-                    <input id="rpk_request_delay" type="number" min="0" max="600" step="1" />
-                    <small class="rpk-details">Таймер отсчитывается после начала получения ответа ST.</small>
-                </label>
-                <label class="rpk-field">
-                    <span>Language</span>
-                    <select id="rpk_language">
-                        <option value="ru">Русский</option>
-                        <option value="en">English</option>
-                    </select>
-                </label>
+            <div class="rpk-actions">
+                <button id="rpk_activate" class="menu-button primary"><i class="fa-solid fa-plug"></i><span>Активировать</span></button>
+                <button id="rpk_disable" class="menu-button"><i class="fa-solid fa-power-off"></i><span>Отключить</span></button>
             </div>
             <label class="rpk-checkbox">
                 <input id="rpk_auto_route" type="checkbox" />
                 <span>Автоматически маршрутизировать Custom OpenAI source</span>
             </label>
-            <div class="rpk-actions">
-                <button id="rpk_launch" class="menu-button primary"><i class="fa-solid fa-play"></i><span>Запустить runtime</span></button>
-                <button id="rpk_stop" class="menu-button"><i class="fa-solid fa-stop"></i><span>Остановить runtime</span></button>
-            </div>
-            <div class="rpk-actions">
-                <button id="rpk_activate" class="menu-button primary"><i class="fa-solid fa-plug"></i><span>Активировать</span></button>
-                <button id="rpk_disable" class="menu-button"><i class="fa-solid fa-power-off"></i><span>Отключить</span></button>
-                <button id="rpk_refresh" class="menu-button"><i class="fa-solid fa-rotate"></i><span>Обновить</span></button>
-            </div>
+
+            <div class="rpk-section-title">Параметры</div>
+            <label class="rpk-field">
+                <span>Режим Kernel</span>
+                <select id="rpk_mode">
+                    <option value="balanced">Balanced — полный pipeline</option>
+                    <option value="fast">Fast — render + state extraction</option>
+                    <option value="lite">Lite — один render-вызов</option>
+                </select>
+            </label>
+            <label class="rpk-field">
+                <span>Пауза между запросами, сек</span>
+                <input id="rpk_request_delay" type="number" min="0" max="600" step="1" />
+                <small class="rpk-details">Отсчёт после начала ответа предыдущего запроса.</small>
+            </label>
+            <label class="rpk-field">
+                <span>Language</span>
+                <select id="rpk_language">
+                    <option value="ru">Русский</option>
+                    <option value="en">English</option>
+                </select>
+            </label>
+
+            <div class="rpk-section-title">Действия</div>
             <div class="rpk-actions">
                 <button id="rpk_approve" class="menu-button" disabled><i class="fa-solid fa-check"></i><span>Подтвердить delta</span></button>
                 <button id="rpk_reject" class="menu-button" disabled><i class="fa-solid fa-xmark"></i><span>Отклонить delta</span></button>
                 <button id="rpk_reset" class="menu-button danger"><i class="fa-solid fa-trash"></i><span>Сбросить сессию</span></button>
             </div>
+
+            <details class="rpk-advanced">
+                <summary>Технические детали</summary>
+                <label class="rpk-field">
+                    <span>Sidecar URL</span>
+                    <input id="rpk_sidecar_url" type="text" autocomplete="off" />
+                </label>
+                <label class="rpk-field">
+                    <span>Integration key</span>
+                    <input id="rpk_integration_key" type="password" autocomplete="new-password" />
+                </label>
+                <label class="rpk-field">
+                    <span>Model ID</span>
+                    <input id="rpk_model" type="text" autocomplete="off" readonly />
+                    <small class="rpk-details">Локальный протокольный идентификатор; реальная модель берётся из профиля ST.</small>
+                </label>
+            </details>
         </div>
     </div>
 </div>

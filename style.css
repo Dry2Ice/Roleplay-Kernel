@@ -43,11 +43,11 @@
 }
 
 .roleplay-kernel-settings .rpk-progress {
-    height: 6px;
+    height: 8px;
     overflow: hidden;
-    border-radius: 3px;
+    border-radius: 4px;
     background: rgba(127, 127, 127, 0.25);
-    margin: 6px 0;
+    margin: 4px 0 6px;
 }
 
 .roleplay-kernel-settings .rpk-progress-bar {
@@ -56,6 +56,60 @@
     border-radius: inherit;
     background: var(--SmartThemeQuoteColor, #4caf50);
     transition: width 180ms ease;
+}
+
+.roleplay-kernel-settings .rpk-progress-card {
+    padding: 10px 12px;
+    margin: 8px 0;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(127, 127, 127, 0.3));
+    border-radius: 8px;
+    background: rgba(127, 127, 127, 0.08);
+}
+
+.roleplay-kernel-settings .rpk-progress-card.is-active {
+    border-color: var(--SmartThemeQuoteColor, #4caf50);
+}
+
+.roleplay-kernel-settings .rpk-progress-card.is-error {
+    border-color: var(--SmartThemeEmColor, #d9534f);
+}
+
+.roleplay-kernel-settings .rpk-progress-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.roleplay-kernel-settings .rpk-progress-label {
+    font-weight: 600;
+    font-size: 0.95em;
+}
+
+.roleplay-kernel-settings .rpk-progress-card .rpk-details {
+    display: block;
+    margin: 4px 0 0;
+}
+
+.roleplay-kernel-settings .rpk-section-title {
+    margin: 12px 0 4px;
+    padding-top: 8px;
+    font-size: 0.8em;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    opacity: 0.7;
+    border-top: 1px solid var(--SmartThemeBorderColor, rgba(127, 127, 127, 0.2));
+}
+
+.roleplay-kernel-settings .rpk-advanced {
+    margin-top: 12px;
+}
+
+.roleplay-kernel-settings .rpk-advanced summary {
+    cursor: pointer;
+    font-size: 0.9em;
+    opacity: 0.8;
 }
 
 .roleplay-kernel-settings .rpk-checkbox {

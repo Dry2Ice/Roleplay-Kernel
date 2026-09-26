@@ -650,6 +650,8 @@ class SessionService:
         self._profile_provider: STConnectionProfileProvider | None = None
         self._profile_signature: tuple[str, str, str, str, str, str, str] | None = None
         self._generation_lock = threading.RLock()
+        self._active_lock = threading.Lock()
+        self._active_session_id: str | None = None
         self.engine = Engine(
             self.provider,
             compiler=ContextCompiler(token_budget=config.token_budget),
@@ -779,15 +781,21 @@ class SessionService:
                     envelope.upstream_profile,
                     envelope.request_delay_seconds,
                 )
-                result = self.engine.advance(
-                    record.session,
-                    user_input,
-                    external_context=context_prompt,
-                    sampling=_render_sampling(
-                        envelope.sampling,
-                        self.config.max_output_tokens,
-                    ),
-                )
+                with self._active_lock:
+                    self._active_session_id = envelope.session_id
+                try:
+                    result = self.engine.advance(
+                        record.session,
+                        user_input,
+                        external_context=context_prompt,
+                        sampling=_render_sampling(
+                            envelope.sampling,
+                            self.config.max_output_tokens,
+                        ),
+                    )
+                finally:
+                    with self._active_lock:
+                        self._active_session_id = None
             record.last_result = result.to_dict()
             record.last_request_key = envelope.request_key
             record.last_request_fingerprint = request_fingerprint
@@ -814,6 +822,11 @@ class SessionService:
         if action == "health":
             return self.health()
         session_id = _required_string(payload, "session_id")
+        if action == "status":
+            with self._active_lock:
+                active_session_id = self._active_session_id
+            if active_session_id == session_id:
+                return self._live_status(session_id)
         with self.store.lock(session_id):
             record = self.store.load(session_id)
             if action == "status":
@@ -965,6 +978,21 @@ class SessionService:
             for (left_role, left_content), (right_role, right_content)
             in zip(actual, expected_tail, strict=True)
         )
+
+    def _live_status(self, session_id: str) -> dict[str, JsonValue]:
+        return {
+            "session_id": session_id,
+            "version": SIDECAR_VERSION,
+            "exists": True,
+            "state_version": 0,
+            "pending_request_id": None,
+            "pending_count": 0,
+            "status": "running",
+            "progress": self.engine.progress,
+            "active_modules": [],
+            "findings": [],
+            "context_hash": None,
+        }
 
     def _status(
         self,
