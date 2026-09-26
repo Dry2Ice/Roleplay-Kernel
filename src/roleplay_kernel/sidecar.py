@@ -41,9 +41,10 @@ from .providers import (
     STConnectionProfileProvider,
     TokenParameter,
 )
+from .summarizer import SummaryConfig, TranscriptSummarizer
 from .utils import ProviderError
 
-SIDECAR_VERSION = "0.9.0"
+SIDECAR_VERSION = "0.10.0"
 PROTOCOL_VERSION = 1
 ENVELOPE_PREFIX = "[ROLEPLAY_KERNEL_ENVELOPE_V1]"
 CONTROL_PREFIX = "[ROLEPLAY_KERNEL_CONTROL_V1]"
@@ -724,6 +725,13 @@ class SessionService:
         self._aborted_sessions: set[str] = set()
         self._economy_mode_active = False
         self._router = router or ProfileRouter(self.provider)
+        summarizer_config = SummaryConfig(
+            enabled=False,
+            keep_recent_pairs=6,
+            summarize_every_pairs=4,
+            hide_old_after_pairs=24,
+        )
+        summarizer = TranscriptSummarizer(summarizer_config)
         self.engine = Engine(
             self.provider,
             compiler=ContextCompiler(token_budget=config.token_budget),
@@ -739,6 +747,7 @@ class SessionService:
             ),
             integrity_key=self.store.integrity_key,
             router=self._router,
+            summarizer=summarizer,
         )
 
     def health(self) -> dict[str, JsonValue]:

@@ -72,13 +72,16 @@ class ContextCompiler:
         user_input: str,
         activations: tuple[ModuleActivation, ...],
         external_context: str = "",
+        state_summary: str = "",
     ) -> PromptPack:
         recent_turns = self._fit_recent_turns(tuple(turns))
         elapsed = state.elapsed_hint
         system = _planner_system(state.language, _render_modules(activations))
         time_passage = {"elapsed_seconds_since_last_turn": elapsed}
+        summary_section = _state_summary_section(state_summary)
         user = (
             f"STATE_DATA\n{_json(state.to_prompt_dict())}\n\n"
+            f"{summary_section}"
             f"TIME_PASSAGE_DATA\n{_json(time_passage)}\n\n"
             f"{_external_context_section(external_context)}"
             f"RECENT_TURNS_DATA\n{_json([turn.to_dict() for turn in recent_turns])}\n\n"
@@ -96,6 +99,25 @@ class ContextCompiler:
             },
         )
 
+    def compile_summary(self, transcript_text: str) -> PromptPack:
+        system = (
+            "You compress roleplay history into a compact summary. "
+            "Preserve character names, locations, injuries, emotional states, "
+            "and unresolved conflicts. Omit small talk and repeated phrases. "
+            "Return only the summary text."
+        )
+        user = (
+            f"HISTORY_DATA\n{_json({'content': transcript_text[:8000]})}\n\n"
+            "Return the summary now."
+        )
+        return self._pack(
+            kind="render",
+            system=system,
+            user=user,
+            activations=(),
+            metadata={},
+        )
+
     def compile_render(
         self,
         *,
@@ -105,14 +127,17 @@ class ContextCompiler:
         plan: dict[str, JsonValue],
         activations: tuple[ModuleActivation, ...],
         external_context: str = "",
+        state_summary: str = "",
     ) -> PromptPack:
         recent_turns = self._fit_recent_turns(tuple(turns))
         language_name = _language_name(state.language)
         output_language = {"language": state.language, "name": language_name}
         time_passage = {"elapsed_seconds_since_last_turn": state.elapsed_hint}
         system = _renderer_system(state.language, _render_modules(activations))
+        summary_section = _state_summary_section(state_summary)
         user = (
             f"STATE_DATA\n{_json(state.to_prompt_dict())}\n\n"
+            f"{summary_section}"
             f"TIME_PASSAGE_DATA\n{_json(time_passage)}\n\n"
             f"{_voice_section(external_context)}"
             f"{_external_context_section(external_context)}"
@@ -623,6 +648,17 @@ def _external_context_section(external_context: str) -> str:
     if not external_context.strip():
         return ""
     return f"EXTERNAL_CONTEXT_DATA\n{_json({'content': external_context})}\n\n"
+
+
+def _state_summary_section(state_summary: str) -> str:
+    if not state_summary.strip():
+        return ""
+    return (
+        "STATE_SUMMARY_DATA\n"
+        f"{_json({'content': state_summary[:2000]})}\n\n"
+        "Earlier posts were compressed into this summary. Treat it as background "
+        "context; the recent turns below are authoritative.\n\n"
+    )
 
 
 def _style_constraints_section(

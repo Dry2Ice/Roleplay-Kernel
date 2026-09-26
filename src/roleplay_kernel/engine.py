@@ -14,6 +14,7 @@ from .compiler import ContextCompiler, PromptPack
 from .models import (
     ChatMessage,
     Completion,
+    ConversationTurn,
     JsonValue,
     Session,
     StateDelta,
@@ -23,6 +24,7 @@ from .modules import ModuleActivation, ModuleRegistry
 from .profiles import ProfileRouter, Stage
 from .providers import ChatProvider
 from .style import StyleTracker
+from .summarizer import TranscriptSummarizer
 from .utils import ProviderError, parse_json_object
 from .validators import (
     DeltaResult,
@@ -207,6 +209,7 @@ class Engine:
         config: EngineConfig | None = None,
         integrity_key: bytes | None = None,
         router: ProfileRouter | None = None,
+        summarizer: TranscriptSummarizer | None = None,
     ) -> None:
         config = config or EngineConfig()
         if router is not None:
@@ -228,6 +231,7 @@ class Engine:
         if self.compiler.token_budget + output_reserve > self.config.context_window:
             raise ValueError("compiler token budget plus output reserve exceeds context window")
         self._pending_commits: dict[tuple[str, str], PendingCommit] = {}
+        self._summarizer = summarizer
         self._style_tracker = StyleTracker()
         self._last_turn_metrics = TurnMetrics()
         self._first_delta_seconds: float | None = None
@@ -463,6 +467,12 @@ class Engine:
         )
         completions: list[Completion] = []
         plan_findings: tuple[Finding, ...] = ()
+        visible_turns = list(session.active_turns())
+        state_summary = ""
+        if self._summarizer is not None:
+            visible_turns, state_summary = self._summarizer.compile(
+                session.active_turns(), self._summarize_old
+            )
         try:
             plan, plan_findings = self._plan(
                 session,
@@ -471,6 +481,8 @@ class Engine:
                 completions,
                 external_context,
                 deadline=deadline,
+                turns=visible_turns,
+                state_summary=state_summary,
             )
         except _StageBudgetExceeded:
             # The reply is still worth producing from the deterministic fallback.
@@ -486,11 +498,12 @@ class Engine:
 
         render_pack = self.compiler.compile_render(
             state=session._state,
-            turns=session.active_turns(),
+            turns=visible_turns,
             user_input=content,
             plan=plan,
             activations=activations,
             external_context=external_context,
+            state_summary=state_summary,
         )
         candidate = self._complete(
             render_pack,
@@ -1001,6 +1014,24 @@ class Engine:
             delta_result,
         )
 
+    def _summarize_old(self, old_turns: list[ConversationTurn]) -> str:
+        if not old_turns:
+            return ""
+        lines = [
+            f"[{turn.role}] {turn.content}"
+            for turn in old_turns
+        ]
+        prompt = self.compiler.compile_summary("\n".join(lines))
+        completion = self._complete(
+            prompt,
+            temperature=0.1,
+            max_tokens=self.config.max_internal_tokens,
+            json_mode=False,
+            completions=[],
+            phase="summarize",
+        )
+        return completion.content.strip()
+
     def _plan(
         self,
         session: Session,
@@ -1010,15 +1041,18 @@ class Engine:
         external_context: str,
         *,
         deadline: float | None = None,
+        turns: list[ConversationTurn] | None = None,
+        state_summary: str = "",
     ) -> tuple[dict[str, JsonValue], tuple[Finding, ...]]:
         if self.config.mode in {"lite", "fast"}:
             return fallback_plan(session._state, user_input), ()
         prompt = self.compiler.compile_plan(
             state=session._state,
-            turns=session.active_turns(),
+            turns=turns if turns is not None else session.active_turns(),
             user_input=user_input,
             activations=activations,
             external_context=external_context,
+            state_summary=state_summary,
         )
         completion = self._complete(
             prompt,

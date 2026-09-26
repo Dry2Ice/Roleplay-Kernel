@@ -15,6 +15,7 @@ class Stage(StrEnum):
     EXTRACT = "extract"
     CRITIC = "critic"
     REPAIR = "repair"
+    SUMMARIZE = "summarize"
 
 
 @dataclass(frozen=True, slots=True)
