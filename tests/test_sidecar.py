@@ -6,11 +6,12 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
 from roleplay_kernel import Completion
+from roleplay_kernel.engine import ClientGoneError, EngineMode
 from roleplay_kernel.models import ChatMessage, JsonValue
 from roleplay_kernel.providers import STConnectionProfileProvider
 from roleplay_kernel.sidecar import (
@@ -43,11 +44,18 @@ class ScriptedProvider:
         max_tokens: int | None = None,
         json_mode: bool = False,
         sampling: Mapping[str, object] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> Completion:
         self.calls.append(tuple(messages))
         if not self.responses:
             raise AssertionError("unexpected provider call")
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if on_delta is not None and not json_mode:
+            midpoint = max(1, len(response.content) // 2)
+            for part in (response.content[:midpoint], response.content[midpoint:]):
+                if part:
+                    on_delta(part)
+        return response
 
 
 class SidecarTests(unittest.TestCase):
@@ -486,6 +494,31 @@ class SidecarTests(unittest.TestCase):
             self.assertEqual(turn.pending_request_id, None)
             self.assertEqual(turn.status, "ok")
 
+    def test_client_disconnect_stops_the_remaining_provider_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = _AbortingProvider()
+            service = SessionService(_config(Path(temporary)), provider=provider)
+            envelope = _envelope_with_history(
+                "chat_gone",
+                [("user", "Я вхожу в комнату"), ("assistant", "Колено горело.")],
+                mode="lite",
+            )
+            calls: list[str] = []
+
+            def abort_after_first_piece() -> bool:
+                return len(calls) >= 1
+
+            with self.assertRaisesRegex(ClientGoneError, "disconnected"):
+                service.generate(
+                    envelope,
+                    _messages_for_envelope(envelope),
+                    "Character: Aria",
+                    on_render_delta=calls.append,
+                    should_abort=abort_after_first_piece,
+                )
+            self.assertEqual(provider.calls, 1)
+            self.assertIn("chat_gone", service._aborted_sessions)
+
     def test_non_loopback_host_header_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config = _config(Path(temporary))
@@ -647,7 +680,9 @@ class SidecarTests(unittest.TestCase):
                     },
                 )
                 self.assertIn("data: [DONE]", stream_body)
-                self.assertIn("Вокруг была пустая станция", stream_body)
+                deltas = _sse_text_deltas(stream_body)
+                self.assertEqual("".join(deltas), "Вокруг была пустая станция.")
+                self.assertGreater(len(deltas), 1, "render must be delivered in pieces")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -871,6 +906,7 @@ def _envelope_with_history(
     history: Sequence[tuple[str, str]],
     *,
     language: str = "ru",
+    mode: str = "balanced",
 ) -> GenerationEnvelope:
     transcript = [
         TranscriptItem(index, role, content)
@@ -885,11 +921,56 @@ def _envelope_with_history(
         pov="third_person_limited",
         tense="past",
         transcript=tuple(transcript),
+        mode=cast(EngineMode, mode),
     )
 
 
 def _message_dicts(messages: list[IncomingMessage]) -> list[dict[str, str]]:
     return [{"role": message.role, "content": message.content} for message in messages]
+
+
+class _BudgetProvider:
+    """Lite-mode provider that simulates an exhausted post-render budget."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> Completion:
+        self.calls += 1
+        return Completion("The station was silent.", "test-model")
+
+
+class _AbortingProvider:
+    """Lite-mode provider that reports a lost client during the render stage."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> Completion:
+        self.calls += 1
+        if on_delta is not None:
+            on_delta("Колено ")
+            # The client disconnects right after the first piece arrives.
+            on_delta("горело.")
+        return Completion("Колено горело.", "test-model")
 
 
 def _pending_provider() -> ScriptedProvider:
@@ -928,6 +1009,7 @@ class _BlockingProvider:
         max_tokens: int | None = None,
         json_mode: bool = False,
         sampling: Mapping[str, object] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> Completion:
         self.calls.append(tuple(messages))
         if len(self.calls) == 1:
@@ -961,6 +1043,30 @@ def _request(
     if not isinstance(value, dict):
         raise AssertionError("response must be an object")
     return cast(dict[str, JsonValue], value)
+
+
+def _sse_text_deltas(body: str) -> list[str]:
+    """Collect the streamed text pieces from an OpenAI-compatible SSE body."""
+    deltas: list[str] = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line.removeprefix("data:").strip()
+        if not data or data == "[DONE]":
+            continue
+        event = json.loads(data)
+        if not isinstance(event, dict):
+            continue
+        for choice in cast(list[JsonValue], event.get("choices") or []):
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    deltas.append(content)
+    return deltas
 
 
 def _request_text(

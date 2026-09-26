@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import unittest
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 
 from roleplay_kernel import (
@@ -38,11 +38,48 @@ class ScriptedProvider:
         max_tokens: int | None = None,
         json_mode: bool = False,
         sampling: Mapping[str, object] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> Completion:
         self.calls.append((messages[-1].content, temperature, max_tokens, json_mode))
         if not self.responses:
             raise AssertionError("scripted provider received an unexpected request")
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if on_delta is not None and not json_mode:
+            midpoint = max(1, len(response.content) // 2)
+            for part in (response.content[:midpoint], response.content[midpoint:]):
+                if part:
+                    on_delta(part)
+        return response
+
+
+class NeverStartingProvider:
+    """Spends the whole turn budget on the first call, then renders normally."""
+
+    def __init__(self, responses: list[Completion], delay: float = 0.05) -> None:
+        self.delegate = ScriptedProvider(responses)
+        self.delay = delay
+        self.calls = 0
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> Completion:
+        self.calls += 1
+        time.sleep(self.delay)
+        return self.delegate.complete(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+            sampling=sampling,
+            on_delta=on_delta,
+        )
 
 
 class BlockingProvider:
@@ -59,6 +96,7 @@ class BlockingProvider:
         max_tokens: int | None = None,
         json_mode: bool = False,
         sampling: Mapping[str, object] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> Completion:
         self.started.set()
         if not self.release.wait(timeout=3):
@@ -423,6 +461,72 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result.status, "needs_confirmation")
         self.assertEqual(session.state.location, "unspecified")
         self.assertEqual(result.pending_operations.operations[0].impact, "high")
+
+    def test_planner_timeout_degrades_to_fallback_and_still_renders(self) -> None:
+        provider = NeverStartingProvider(
+            [
+                Completion("The station was silent.", "test-model"),
+                Completion('{"operations": []}', "test-model"),
+                Completion('{"findings": []}', "test-model"),
+            ]
+        )
+        engine = Engine(
+            provider,
+            config=EngineConfig(mode="balanced", turn_budget_seconds=30.0),
+        )
+        session = engine.new_session()
+        # A zero post-render budget makes the planner overrun observable.
+        engine.config = replace(engine.config, post_render_grace_seconds=0.0)
+        result = engine.advance(session, "Я вхожу в комнату")
+
+        self.assertEqual(result.text, "The station was silent.")
+        codes = {finding.code for finding in result.findings}
+        self.assertTrue(
+            {"planner_skipped", "extract_skipped", "critic_skipped"} & codes,
+            f"expected a degradation finding, got {codes}",
+        )
+
+    def test_expired_post_render_budget_delivers_the_post_without_state(self) -> None:
+        engine = Engine(
+            ScriptedProvider(
+                [
+                    Completion(_plan_json(), "test-model"),
+                    Completion("The station was silent.", "test-model"),
+                ]
+            ),
+            config=EngineConfig(
+                mode="balanced",
+                post_render_grace_seconds=0.0,
+                turn_budget_seconds=30.0,
+            ),
+        )
+        session = engine.new_session()
+
+        result = engine.advance(session, "Я вхожу в комнату")
+
+        self.assertEqual(result.text, "The station was silent.")
+        codes = {finding.code for finding in result.findings}
+        self.assertTrue(
+            {"extract_skipped", "critic_skipped", "state_frozen"} & codes,
+            f"expected a degradation finding, got {codes}",
+        )
+        self.assertEqual(result.state_delta.operations, ())
+
+    def test_metrics_report_streaming_timings(self) -> None:
+        deltas: list[str] = []
+        engine = Engine(
+            ScriptedProvider([Completion("The station was silent.", "test-model")]),
+            config=EngineConfig(mode="lite"),
+        )
+        session = engine.new_session()
+
+        engine.advance(session, "Я вхожу в комнату", on_render_delta=deltas.append)
+
+        metrics = engine.metrics
+        self.assertEqual(metrics.provider_calls, 1)
+        self.assertTrue(metrics.delivered)
+        self.assertIsNotNone(metrics.first_token_seconds)
+        self.assertGreaterEqual(metrics.total_seconds, 0.0)
 
     def test_lite_mode_uses_one_render_request(self) -> None:
         provider = ScriptedProvider(

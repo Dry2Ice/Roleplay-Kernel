@@ -5,7 +5,8 @@ import hmac
 import json
 import math
 import secrets
-from collections.abc import Iterable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -41,6 +42,44 @@ TurnStatus = Literal["ok", "repaired", "needs_confirmation", "needs_attention"]
 _ALLOWED_FINISH_REASONS = {None, "stop", "end_turn", "eos", "length"}
 
 
+class ClientGoneError(RuntimeError):
+    """Raised when the ST client stopped waiting for the turn."""
+
+
+class _StageBudgetExceeded(RuntimeError):
+    """Raised when a stage could not start because its budget was exhausted."""
+
+
+@dataclass(frozen=True, slots=True)
+class TurnMetrics:
+    """Timing and call count for the last completed turn."""
+
+    provider_calls: int = 0
+    first_token_seconds: float | None = None
+    render_seconds: float = 0.0
+    total_seconds: float = 0.0
+    delivered: bool = False
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "provider_calls": self.provider_calls,
+            "first_token_seconds": (
+                round(self.first_token_seconds, 3)
+                if self.first_token_seconds is not None
+                else None
+            ),
+            "render_seconds": round(self.render_seconds, 3),
+            "total_seconds": round(self.total_seconds, 3),
+            "streamed": self.delivered,
+        }
+
+
+def _deadline_abort(deadline: float | None) -> Callable[[], bool] | None:
+    if deadline is None:
+        return None
+    return lambda: time.monotonic() >= deadline
+
+
 class StaleTurnResultError(RuntimeError):
     pass
 
@@ -63,6 +102,8 @@ class EngineConfig:
     critic_temperature: float = 0.1
     extract_temperature: float = 0.0
     repair_temperature: float = 0.3
+    turn_budget_seconds: float = 300.0
+    post_render_grace_seconds: float = 90.0
 
     def __post_init__(self) -> None:
         if self.mode not in {"lite", "fast", "balanced", "strict"}:
@@ -73,6 +114,18 @@ class EngineConfig:
             raise ValueError("context_window must be positive")
         if self.max_output_tokens < 1 or self.max_internal_tokens < 1:
             raise ValueError("token limits must be positive")
+        if (
+            isinstance(self.turn_budget_seconds, bool)
+            or not math.isfinite(self.turn_budget_seconds)
+            or not 30.0 <= self.turn_budget_seconds <= 3600.0
+        ):
+            raise ValueError("turn_budget_seconds must be between 30 and 3600")
+        if (
+            isinstance(self.post_render_grace_seconds, bool)
+            or not math.isfinite(self.post_render_grace_seconds)
+            or not 0.0 <= self.post_render_grace_seconds <= 600.0
+        ):
+            raise ValueError("post_render_grace_seconds must be between 0 and 600")
         for name, value in (
             ("plan_temperature", self.plan_temperature),
             ("render_temperature", self.render_temperature),
@@ -160,6 +213,9 @@ class Engine:
         if self.compiler.token_budget + output_reserve > self.config.context_window:
             raise ValueError("compiler token budget plus output reserve exceeds context window")
         self._pending_commits: dict[tuple[str, str], PendingCommit] = {}
+        self._last_turn_metrics = TurnMetrics()
+        self._first_delta_seconds: float | None = None
+        self._render_started_at: float | None = None
         self._progress: dict[str, JsonValue] = {
             "active": False,
             "phase": "idle",
@@ -284,6 +340,8 @@ class Engine:
         disabled_modules: Iterable[str] = (),
         external_context: str = "",
         sampling: Mapping[str, JsonValue] | None = None,
+        on_render_delta: Callable[[str], None] | None = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> TurnResult:
         with session._lock:
             self._begin_progress()
@@ -295,12 +353,37 @@ class Engine:
                     disabled_modules=disabled_modules,
                     external_context=external_context,
                     sampling=sampling,
+                    on_render_delta=on_render_delta,
+                    should_abort=should_abort,
                 )
             except Exception:
                 self._fail_progress()
                 raise
             self._finish_progress(result.status)
             return result
+
+    def _deadline(self) -> float:
+        return time.monotonic() + self.config.turn_budget_seconds
+
+    @property
+    def metrics(self) -> TurnMetrics:
+        return self._last_turn_metrics
+
+    def _tracked_render_delta(
+        self,
+        sink: Callable[[str], None] | None,
+    ) -> Callable[[str], None] | None:
+        """Record when the first streamed token reached the client."""
+        if sink is None:
+            return None
+        started = time.monotonic()
+
+        def tracked(text: str) -> None:
+            if self._first_delta_seconds is None:
+                self._first_delta_seconds = max(0.0, time.monotonic() - started)
+            sink(text)
+
+        return tracked
 
     def _advance_locked(
         self,
@@ -311,11 +394,16 @@ class Engine:
         disabled_modules: Iterable[str],
         external_context: str,
         sampling: Mapping[str, JsonValue] | None,
+        on_render_delta: Callable[[str], None] | None = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> TurnResult:
         content = user_input.strip()
         if not content:
             raise ValueError("user_input must be non-empty")
-
+        turn_started = time.monotonic()
+        deadline = self._deadline()
+        self._first_delta_seconds = None
+        self._last_turn_metrics = TurnMetrics()
         request_id = new_id("request")
         base_state_version = session._state.version
         activations = self.registry.activate(
@@ -325,13 +413,27 @@ class Engine:
             disabled=disabled_modules,
         )
         completions: list[Completion] = []
-        plan, plan_findings = self._plan(
-            session,
-            content,
-            activations,
-            completions,
-            external_context,
-        )
+        plan_findings: tuple[Finding, ...] = ()
+        try:
+            plan, plan_findings = self._plan(
+                session,
+                content,
+                activations,
+                completions,
+                external_context,
+                deadline=deadline,
+            )
+        except _StageBudgetExceeded:
+            # The reply is still worth producing from the deterministic fallback.
+            plan = fallback_plan(session._state, content)
+            plan_findings = (
+                Finding(
+                    severity="warning",
+                    code="planner_skipped",
+                    message="Planning was skipped: the turn budget was exhausted",
+                    confidence=1.0,
+                ),
+            )
 
         render_pack = self.compiler.compile_render(
             state=session._state,
@@ -349,10 +451,19 @@ class Engine:
             completions=completions,
             sampling=sampling,
             phase="render",
+            on_delta=self._tracked_render_delta(on_render_delta),
+            should_abort=should_abort,
         ).content.strip()
         if not candidate:
             raise RuntimeError("renderer returned an empty post")
+        if should_abort is not None and should_abort():
+            raise ClientGoneError("client disconnected after rendering")
 
+        # The reply is already on the wire, so the remaining stages get their own
+        # budget: losing the critic must never lose the post.
+        first_token_seconds = self._first_delta_seconds
+        render_seconds = max(0.0, time.monotonic() - turn_started)
+        post_render_deadline = time.monotonic() + self.config.post_render_grace_seconds
         candidate_findings, delta_result = self._evaluate_candidate(
             session,
             plan,
@@ -360,6 +471,7 @@ class Engine:
             activations,
             completions,
             external_context,
+            deadline=post_render_deadline,
         )
         repairs = 0
         if self.config.mode == "strict":
@@ -483,6 +595,14 @@ class Engine:
         else:
             status = "ok"
 
+        total_seconds = max(0.0, time.monotonic() - turn_started)
+        self._last_turn_metrics = TurnMetrics(
+            provider_calls=len(completions),
+            first_token_seconds=first_token_seconds,
+            render_seconds=render_seconds,
+            total_seconds=total_seconds,
+            delivered=bool(on_render_delta is not None),
+        )
         return TurnResult(
             request_id=request_id,
             session_id=session.id,
@@ -696,6 +816,8 @@ class Engine:
         activations: tuple[ModuleActivation, ...],
         completions: list[Completion],
         external_context: str,
+        *,
+        deadline: float | None = None,
     ) -> tuple[tuple[Finding, ...], DeltaResult]:
         deterministic = validate_candidate(
             candidate=candidate,
@@ -720,33 +842,73 @@ class Engine:
                 ),
                 DeltaResult(delta=StateDelta(), findings=()),
             )
-        delta_result = self._extract(
-            session,
-            plan,
-            candidate,
-            completions,
-            external_context,
-        )
-        if self.config.mode == "fast":
+        degradation: list[Finding] = []
+        delta_result: DeltaResult | None = None
+        try:
+            delta_result = self._extract(
+                session,
+                plan,
+                candidate,
+                completions,
+                external_context,
+                deadline=deadline,
+            )
+        except _StageBudgetExceeded:
+            degradation.append(
+                Finding(
+                    severity="warning",
+                    code="extract_skipped",
+                    message="State extraction was skipped: the post-render budget expired",
+                    confidence=1.0,
+                )
+            )
+        if delta_result is not None and self.config.mode == "fast":
             delta_result = defer_unverified_operations(
                 delta_result,
                 reason="Fast mode has no independent semantic state verifier",
             )
         model_findings: tuple[Finding, ...] = ()
         if self.config.mode in {"balanced", "strict"}:
-            model_findings = self._critic(
-                session,
-                plan,
-                candidate,
-                delta_result.delta,
-                deterministic,
-                activations,
-                completions,
-                external_context,
+            try:
+                model_findings = self._critic(
+                    session,
+                    plan,
+                    candidate,
+                    delta_result.delta if delta_result is not None else StateDelta(),
+                    deterministic,
+                    activations,
+                    completions,
+                    external_context,
+                    deadline=deadline,
+                )
+            except _StageBudgetExceeded:
+                degradation.append(
+                    Finding(
+                        severity="warning",
+                        code="critic_skipped",
+                        message="Critic review was skipped: the post-render budget expired",
+                        confidence=1.0,
+                    )
+                )
+            if delta_result is not None:
+                delta_result = defer_critic_flagged_operations(delta_result, model_findings)
+        if delta_result is None:
+            delta_result = DeltaResult(delta=StateDelta(), findings=())
+            degradation.append(
+                Finding(
+                    severity="warning",
+                    code="state_frozen",
+                    message="The post is delivered, but the state was not updated this turn",
+                    confidence=1.0,
+                )
             )
-            delta_result = defer_critic_flagged_operations(delta_result, model_findings)
         return (
-            merge_findings(deterministic, delta_result.findings, model_findings),
+            merge_findings(
+                deterministic,
+                degradation,
+                delta_result.findings,
+                model_findings,
+            ),
             delta_result,
         )
 
@@ -757,6 +919,8 @@ class Engine:
         activations: tuple[ModuleActivation, ...],
         completions: list[Completion],
         external_context: str,
+        *,
+        deadline: float | None = None,
     ) -> tuple[dict[str, JsonValue], tuple[Finding, ...]]:
         if self.config.mode in {"lite", "fast"}:
             return fallback_plan(session._state, user_input), ()
@@ -774,6 +938,7 @@ class Engine:
             json_mode=True,
             completions=completions,
             phase="plan",
+            should_abort=_deadline_abort(deadline),
         )
         try:
             raw = parse_json_object(completion.content)
@@ -796,6 +961,8 @@ class Engine:
         candidate: str,
         completions: list[Completion],
         external_context: str,
+        *,
+        deadline: float | None = None,
     ) -> DeltaResult:
         prompt = self.compiler.compile_extract(
             state=session._state,
@@ -810,6 +977,7 @@ class Engine:
             json_mode=True,
             completions=completions,
             phase="extract",
+            should_abort=_deadline_abort(deadline),
         )
         try:
             raw = parse_json_object(completion.content)
@@ -837,6 +1005,8 @@ class Engine:
         activations: tuple[ModuleActivation, ...],
         completions: list[Completion],
         external_context: str,
+        *,
+        deadline: float | None = None,
     ) -> tuple[Finding, ...]:
         prompt = self.compiler.compile_critic(
             state=session._state,
@@ -854,6 +1024,7 @@ class Engine:
             json_mode=True,
             completions=completions,
             phase="critic",
+            should_abort=_deadline_abort(deadline),
         )
         try:
             raw = parse_json_object(completion.content)
@@ -911,8 +1082,12 @@ class Engine:
         completions: list[Completion],
         sampling: Mapping[str, JsonValue] | None = None,
         phase: str = "request",
+        on_delta: Callable[[str], None] | None = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> Completion:
         self._set_progress(phase, len(completions), phase)
+        if should_abort is not None and should_abort():
+            raise _StageBudgetExceeded(f"stage {phase} exceeded its time budget")
         completion = self.provider.complete(
             (
                 ChatMessage(role="system", content=prompt.system),
@@ -922,6 +1097,7 @@ class Engine:
             max_tokens=max_tokens,
             json_mode=json_mode and self.config.use_json_mode,
             sampling=sampling,
+            on_delta=on_delta,
         )
         self._set_progress(phase, len(completions) + 1, phase)
         if completion.finish_reason not in _ALLOWED_FINISH_REASONS:

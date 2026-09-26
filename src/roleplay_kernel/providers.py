@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from email.message import Message
 from http.cookiejar import CookieJar
@@ -20,8 +20,10 @@ from .models import ChatMessage, Completion
 from .utils import ProviderError
 
 TokenParameter = Literal["max_tokens", "max_completion_tokens"]
+DeltaSink = Callable[[str], None]
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_ERROR_RESPONSE_BYTES = 65_536
+_STREAM_CHUNK_BYTES = 4096
 _PROTECTED_BODY_KEYS = frozenset({"model", "messages", "stream", "response_format"})
 _ALLOWED_FINISH_REASONS = frozenset({"stop", "end_turn", "eos", "length"})
 _ALLOWED_SAMPLING_KEYS = frozenset(
@@ -64,6 +66,7 @@ class ChatProvider(Protocol):
         max_tokens: int | None = None,
         json_mode: bool = False,
         sampling: Mapping[str, object] | None = None,
+        on_delta: DeltaSink | None = None,
     ) -> Completion:
         ...
 
@@ -107,6 +110,7 @@ class OpenAICompatibleProvider:
         max_tokens: int | None = None,
         json_mode: bool = False,
         sampling: Mapping[str, object] | None = None,
+        on_delta: DeltaSink | None = None,
     ) -> Completion:
         if not messages:
             raise ValueError("messages must not be empty")
@@ -116,10 +120,11 @@ class OpenAICompatibleProvider:
         _validate_max_tokens(max_tokens)
         _validate_sampling(sampling)
         _validate_extra_body(self.extra_body)
+        streaming = on_delta is not None and not json_mode
         payload: dict[str, object] = {
             "model": self.model,
             "messages": [message.to_dict() for message in messages],
-            "stream": False,
+            "stream": streaming,
         }
         if temperature is not None:
             payload["temperature"] = temperature
@@ -132,7 +137,7 @@ class OpenAICompatibleProvider:
             payload.update(_sampling_payload(sampling))
 
         headers: dict[str, str] = {
-            "Accept": "application/json",
+            "Accept": "text/event-stream" if streaming else "application/json",
             "Content-Type": "application/json",
         }
         headers.update(self.default_headers)
@@ -152,6 +157,8 @@ class OpenAICompatibleProvider:
                 status = response.status if hasattr(response, "status") else None
                 if isinstance(status, int) and 300 <= status < 400:
                     raise ProviderError("provider redirect response rejected")
+                if streaming:
+                    return self._read_stream(response, on_delta)
                 raw_bytes = response.read(MAX_RESPONSE_BYTES + 1)
                 if len(raw_bytes) > MAX_RESPONSE_BYTES:
                     raise ProviderError("provider response exceeds the size limit")
@@ -196,7 +203,13 @@ class OpenAICompatibleProvider:
                 max_tokens=expanded,
                 json_mode=json_mode,
                 sampling=retry_sampling,
+                on_delta=on_delta,
             )
+
+    def _read_stream(self, response: IO[bytes], on_delta: DeltaSink | None) -> Completion:
+        if on_delta is None:
+            raise ValueError("on_delta is required for streaming")
+        return _read_sse_stream(response, on_delta, self.model)
 
     def _completion_url(self) -> str:
         parsed = _validate_base_url(self.base_url, self.allow_insecure_http)
@@ -208,6 +221,81 @@ class OpenAICompatibleProvider:
 
     def _parse_completion(self, data: dict[str, object]) -> Completion:
         return _parse_completion(data, self.model)
+
+
+def _stream_choices(event: dict[str, object]) -> list[object]:
+    choices = event.get("choices")
+    return choices if isinstance(choices, list) else []
+
+
+def _read_sse_stream(
+    response: IO[bytes],
+    on_delta: DeltaSink,
+    model: str,
+) -> Completion:
+    """Consume an OpenAI-style SSE stream and forward text deltas."""
+    parts: list[str] = []
+    finish_reason: str | None = None
+    usage: dict[str, int] = {}
+    total = 0
+    buffer = ""
+    while True:
+        raw = response.read(_STREAM_CHUNK_BYTES)
+        if not raw:
+            break
+        total += len(raw)
+        if total > MAX_RESPONSE_BYTES:
+            raise ProviderError("provider response exceeds the size limit")
+        buffer += raw.decode("utf-8", errors="replace")
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line.removeprefix("data:").strip()
+            if data == "[DONE]":
+                buffer = ""
+                break
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if isinstance(event.get("usage"), dict):
+                usage = _usage(event["usage"])
+            error_value = event.get("error")
+            if error_value:
+                message = (
+                    error_value.get("message")
+                    if isinstance(error_value, dict)
+                    else error_value
+                )
+                raise ProviderError(f"provider stream error: {str(message)[:300]}")
+            for choice in _stream_choices(event):
+                if not isinstance(choice, dict):
+                    continue
+                reason = choice.get("finish_reason")
+                if isinstance(reason, str) and reason:
+                    if reason not in _ALLOWED_FINISH_REASONS:
+                        raise ProviderError(
+                            f"provider returned unsupported finish_reason={reason}"
+                        )
+                    finish_reason = reason
+                delta = choice.get("delta")
+                content = delta.get("content") if isinstance(delta, dict) else None
+                if isinstance(content, str) and content:
+                    parts.append(content)
+                    on_delta(content)
+    text = "".join(parts)
+    if not text.strip():
+        raise _EmptyContentError("provider returned an empty stream")
+    return Completion(
+        content=text,
+        model=model,
+        usage=usage,
+        finish_reason=finish_reason,
+    )
 
 
 class _STCsrfError(ProviderError):
@@ -281,6 +369,7 @@ class STConnectionProfileProvider:
         max_tokens: int | None = None,
         json_mode: bool = False,
         sampling: Mapping[str, object] | None = None,
+        on_delta: DeltaSink | None = None,
     ) -> Completion:
         if not messages:
             raise ValueError("messages must not be empty")
@@ -297,7 +386,15 @@ class STConnectionProfileProvider:
                 self._wait_for_rate_limit()
                 self._wait_for_inter_request()
                 try:
-                    return self._post(messages, token, temperature, max_tokens, json_mode, sampling)
+                    return self._post(
+                        messages,
+                        token,
+                        temperature,
+                        max_tokens,
+                        json_mode,
+                        sampling,
+                        on_delta,
+                    )
                 except _STCsrfError:
                     token = self._fetch_csrf_token()
                 except _RateLimitedError:
@@ -374,12 +471,14 @@ class STConnectionProfileProvider:
         max_tokens: int | None,
         json_mode: bool,
         sampling: Mapping[str, object] | None,
+        on_delta: DeltaSink | None = None,
     ) -> Completion:
+        streaming = on_delta is not None and not json_mode
         payload: dict[str, object] = {
             "chat_completion_source": self.source,
             "model": self.model,
             "messages": [message.to_dict() for message in messages],
-            "stream": False,
+            "stream": streaming,
             "use_sysprompt": True,
             "custom_prompt_post_processing": "",
         }
@@ -399,7 +498,7 @@ class STConnectionProfileProvider:
             f"{self.st_base_url}/api/backends/chat-completions/generate",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={
-                "Accept": "application/json",
+                "Accept": "text/event-stream" if streaming else "application/json",
                 "Content-Type": "application/json",
                 "X-CSRF-Token": csrf_token,
             },
@@ -408,6 +507,9 @@ class STConnectionProfileProvider:
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 self._mark_response_started()
+                if streaming:
+                    assert on_delta is not None
+                    return _read_sse_stream(response, on_delta, self.model)
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as error:
             status = error.code

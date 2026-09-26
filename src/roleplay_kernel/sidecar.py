@@ -14,7 +14,7 @@ import subprocess
 import threading
 import time
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 
 from .compiler import ContextBudgetError, ContextCompiler
 from .engine import (
+    ClientGoneError,
     Engine,
     EngineConfig,
     EngineMode,
@@ -32,6 +33,7 @@ from .engine import (
 from .models import JsonValue, Session, new_id
 from .providers import (
     ChatProvider,
+    DeltaSink,
     OpenAICompatibleProvider,
     STConnectionProfileProvider,
     TokenParameter,
@@ -65,6 +67,8 @@ _CONFIG_KEYS = {
     "max_repairs",
     "max_context_chars",
     "allow_insecure_http",
+    "turn_budget_seconds",
+    "post_render_grace_seconds",
 }
 
 
@@ -82,6 +86,9 @@ class KernelServiceProtocol(Protocol):
         envelope: GenerationEnvelope,
         messages: list[IncomingMessage],
         context_prompt: str,
+        *,
+        on_render_delta: DeltaSink | None = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> TurnPayload: ...
 
     def control(self, action: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]: ...
@@ -108,6 +115,8 @@ class SidecarConfig:
     max_repairs: int
     max_context_chars: int
     allow_insecure_http: bool
+    turn_budget_seconds: float = 300.0
+    post_render_grace_seconds: float = 90.0
 
     @classmethod
     def load(cls, path: Path | None = None) -> SidecarConfig:
@@ -205,6 +214,20 @@ class SidecarConfig:
             "RPK_ALLOW_INSECURE_HTTP",
             _config_bool(data.get("allow_insecure_http"), False),
         )
+        turn_budget_seconds = _env_float(
+            env,
+            "RPK_TURN_BUDGET_SECONDS",
+            _config_float(data.get("turn_budget_seconds"), 300.0),
+            minimum=30.0,
+            maximum=3600.0,
+        )
+        post_render_grace_seconds = _env_float(
+            env,
+            "RPK_POST_RENDER_GRACE_SECONDS",
+            _config_float(data.get("post_render_grace_seconds"), 90.0),
+            minimum=0.0,
+            maximum=600.0,
+        )
         config = cls(
             host=host,
             port=port,
@@ -223,11 +246,25 @@ class SidecarConfig:
             max_repairs=max_repairs,
             max_context_chars=max_context_chars,
             allow_insecure_http=allow_insecure_http,
+            turn_budget_seconds=turn_budget_seconds,
+            post_render_grace_seconds=post_render_grace_seconds,
         )
         config.validate()
         return config
 
     def validate(self) -> None:
+        if (
+            isinstance(self.turn_budget_seconds, bool)
+            or not math.isfinite(self.turn_budget_seconds)
+            or not 30.0 <= self.turn_budget_seconds <= 3600.0
+        ):
+            raise ValueError("turn_budget_seconds must be between 30 and 3600")
+        if (
+            isinstance(self.post_render_grace_seconds, bool)
+            or not math.isfinite(self.post_render_grace_seconds)
+            or not 0.0 <= self.post_render_grace_seconds <= 600.0
+        ):
+            raise ValueError("post_render_grace_seconds must be between 0 and 600")
         if not self.upstream_base_url:
             raise ValueError("upstream_base_url is required")
         if not self.upstream_model:
@@ -653,6 +690,7 @@ class SessionService:
         self._active_lock = threading.Lock()
         self._active_session_id: str | None = None
         self._reconciled_sessions: set[str] = set()
+        self._aborted_sessions: set[str] = set()
         self.engine = Engine(
             self.provider,
             compiler=ContextCompiler(token_budget=config.token_budget),
@@ -662,6 +700,8 @@ class SessionService:
                 max_output_tokens=config.max_output_tokens,
                 max_internal_tokens=config.max_internal_tokens,
                 max_repairs=config.max_repairs,
+                turn_budget_seconds=config.turn_budget_seconds,
+                post_render_grace_seconds=config.post_render_grace_seconds,
             ),
             integrity_key=self.store.integrity_key,
         )
@@ -675,6 +715,7 @@ class SessionService:
             "upstream_profile_id": (
                 self._profile_signature[0] if self._profile_signature is not None else None
             ),
+            "metrics": self.engine.metrics.to_dict(),
         }
 
     def _apply_mode(self, mode: EngineMode) -> None:
@@ -727,6 +768,9 @@ class SessionService:
         envelope: GenerationEnvelope,
         messages: list[IncomingMessage],
         context_prompt: str,
+        *,
+        on_render_delta: DeltaSink | None = None,
+        should_abort: Callable[[], bool] | None = None,
     ) -> TurnPayload:
         with self.store.lock(envelope.session_id):
             record = self.store.load(envelope.session_id)
@@ -791,6 +835,19 @@ class SessionService:
                 )
                 with self._active_lock:
                     self._active_session_id = envelope.session_id
+                    self._aborted_sessions.discard(envelope.session_id)
+                guarded_delta: DeltaSink | None = None
+                if on_render_delta is not None:
+                    guarded_delta = (
+                        on_render_delta
+                        if should_abort is None
+                        else _aborting_sink(
+                            on_render_delta,
+                            should_abort,
+                            self._aborted_sessions,
+                            envelope.session_id,
+                        )
+                    )
                 try:
                     result = self.engine.advance(
                         record.session,
@@ -800,6 +857,8 @@ class SessionService:
                             envelope.sampling,
                             self.config.max_output_tokens,
                         ),
+                        on_render_delta=guarded_delta,
+                        should_abort=should_abort,
                     )
                 finally:
                     with self._active_lock:
@@ -1043,6 +1102,7 @@ class SessionService:
             "findings": last_result.get("findings", []),
             "context_hash": record.context_hash,
             "transcript_reconciled": session_id in self._reconciled_sessions,
+            "metrics": self.engine.metrics.to_dict(),
         }
 
     def _sync_transcript(
@@ -1127,7 +1187,13 @@ class SidecarApplication:
         self.service = service
         self.throttle = AuthThrottle()
 
-    def chat_completion(self, payload: dict[str, JsonValue]) -> tuple[dict[str, JsonValue], bool]:
+    def chat_completion(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        on_render_delta: DeltaSink | None = None,
+        should_abort: Callable[[], bool] | None = None,
+    ) -> tuple[dict[str, JsonValue], bool]:
         model = _required_string(payload, "model")
         messages = _parse_messages(payload.get("messages"))
         stream = bool(payload.get("stream", False))
@@ -1155,9 +1221,15 @@ class SidecarApplication:
             ),
             self.config.max_context_chars,
         )
-        turn = self.service.generate(envelope, messages, context_prompt)
+        turn = self.service.generate(
+            envelope,
+            messages,
+            context_prompt,
+            on_render_delta=on_render_delta,
+            should_abort=should_abort,
+        )
         return (
-            _completion_response(turn.text, model, {}),
+            _completion_response(turn.text, model, turn.usage),
             stream,
         )
 
@@ -1196,6 +1268,126 @@ class SidecarApplication:
         if not hostname:
             return False
         return _is_loopback(hostname)
+
+
+def _aborting_sink(
+    sink: DeltaSink,
+    should_abort: Callable[[], bool],
+    aborted: set[str],
+    session_id: str,
+) -> DeltaSink:
+    """Wrap a delta sink so a lost client aborts generation instead of retrying."""
+
+    def guarded(text: str) -> None:
+        if should_abort():
+            aborted.add(session_id)
+            raise ClientGoneError("client disconnected during generation")
+        sink(text)
+
+    return guarded
+
+
+class _SseWriter:
+    """Writes OpenAI-compatible SSE chunks for one response.
+
+    The writer switches to a failed state after the first write error so a
+    disconnected client (a Stop press in SillyTavern) is detected once and the
+    generation can be abandoned instead of burning provider quota.
+    """
+
+    def __init__(self, handler: SidecarRequestHandler) -> None:
+        self._handler = handler
+        self._base: dict[str, JsonValue] = {}
+        self._started = False
+        self._failed = False
+        self._sent_role = False
+
+    def start(self, response: dict[str, JsonValue]) -> None:
+        self._base = {
+            "id": _optional_string(response, "id", new_id("chatcmpl")),
+            "object": "chat.completion.chunk",
+            "created": _optional_int(response, "created", int(time.time())),
+            "model": _optional_string(response, "model", "roleplay-kernel"),
+        }
+        self._handler.send_response(200)
+        self._handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self._handler.send_header("Cache-Control", "no-cache")
+        self._handler.send_header("X-Accel-Buffering", "no")
+        self._handler._send_cors_headers()
+        self._handler.end_headers()
+        self._started = True
+
+    @property
+    def failed(self) -> bool:
+        return self._failed
+
+    def write_role(self) -> None:
+        if self._sent_role or self._failed:
+            return
+        self._write({"role": "assistant"})
+
+    def write_delta(self, text: str) -> None:
+        if not text or self._failed:
+            return
+        self.write_role()
+        self._write({"content": text})
+
+    def write_final(self, response: dict[str, JsonValue] | None = None) -> None:
+        if self._failed:
+            return
+        self.write_role()
+        if response is not None:
+            usage = response.get("usage")
+            if isinstance(usage, dict) and usage:
+                chunk = dict(self._base)
+                chunk["choices"] = [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                chunk["usage"] = cast(JsonValue, usage)
+                self._send(chunk)
+                self._write({})
+                return
+        self._write({}, finish_reason="stop")
+        self._finish()
+
+    def write_error(self, code: str, message: str) -> None:
+        if self._failed:
+            return
+        self._send(
+            {
+                "error": {"message": message, "type": "roleplay_kernel_error", "code": code}
+            }
+        )
+        self._finish()
+
+    def _write(
+        self,
+        delta: dict[str, JsonValue],
+        *,
+        finish_reason: str | None = None,
+    ) -> None:
+        chunk = dict(self._base)
+        chunk["choices"] = [
+            {"index": 0, "delta": delta, "finish_reason": finish_reason}
+        ]
+        self._send(chunk)
+
+    def _send(self, payload: dict[str, JsonValue]) -> None:
+        if self._failed:
+            return
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        try:
+            self._handler.wfile.write(f"data: {data}\n\n".encode())
+            self._handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            self._failed = True
+
+    def _finish(self) -> None:
+        if self._failed:
+            return
+        try:
+            self._handler.wfile.write(b"data: [DONE]\n\n")
+            self._handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            self._failed = True
 
 
 class SidecarRequestHandler(BaseHTTPRequestHandler):
@@ -1290,9 +1482,20 @@ class SidecarRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self._read_payload()
+        except SidecarError as error:
+            self._send_error_json(error.status, error.code, error.message)
+            return
+        if bool(payload.get("stream", False)) and not _required_string(
+            payload, "model"
+        ).startswith(CONTROL_MODEL_PREFIX):
+            self._stream_generation(payload)
+            return
+        try:
             response, stream = self.application.chat_completion(payload)
         except SidecarError as error:
             self._send_error_json(error.status, error.code, error.message)
+            return
+        except ClientGoneError:
             return
         except ContextBudgetError:
             self._send_error_json(
@@ -1324,6 +1527,52 @@ class SidecarRequestHandler(BaseHTTPRequestHandler):
             self._send_sse(response)
         else:
             self._send_json(200, response)
+
+    def _stream_generation(self, payload: dict[str, JsonValue]) -> None:
+        """Stream the render stage to ST, then run the remaining stages.
+
+        The text is delivered while the model writes it, so extraction and the
+        critic no longer add to the time the user waits for the first token. If
+        the client disconnects the turn is abandoned instead of spending the
+        remaining provider calls.
+        """
+        writer = _SseWriter(self)
+        writer.start({"model": _required_string(payload, "model")})
+        try:
+            response, _stream = self.application.chat_completion(
+                payload,
+                on_render_delta=writer.write_delta,
+                should_abort=lambda: writer.failed,
+            )
+        except ClientGoneError:
+            return
+        except SidecarError as error:
+            writer.write_error(error.code, error.message)
+            return
+        except ContextBudgetError:
+            writer.write_error(
+                "context_budget_exceeded",
+                "compiled prompt exceeds the configured context budget",
+            )
+            return
+        except (StaleTurnResultError, UnknownPendingCommitError):
+            writer.write_error("stale_session", "session state changed; refresh and retry")
+            return
+        except ProviderError as error:
+            writer.write_error("upstream_error", str(error)[:500] or "upstream request failed")
+            return
+        except OSError:
+            writer.write_error("storage_error", "session storage is unavailable")
+            return
+        except ValueError:
+            writer.write_error("invalid_request", "request data is invalid")
+            return
+        except Exception:
+            writer.write_error("internal_error", "unexpected sidecar failure")
+            return
+        if writer.failed:
+            return
+        writer.write_final(response)
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -1704,6 +1953,16 @@ def _config_int(value: JsonValue | None, default: int) -> int:
     return value
 
 
+def _config_float(value: JsonValue | None, default: float) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("config numeric values must be numbers")
+    if not math.isfinite(float(value)):
+        raise ValueError("config numeric values must be finite")
+    return float(value)
+
+
 def _config_bool(value: JsonValue | None, default: bool) -> bool:
     if value is None:
         return default
@@ -1773,6 +2032,28 @@ def _env_int(env: Mapping[str, str], key: str, default: int, *, minimum: int) ->
         raise ValueError(f"{key} must be an integer") from error
     if parsed < minimum:
         raise ValueError(f"{key} must be at least {minimum}")
+    return parsed
+
+
+def _env_float(
+    env: Mapping[str, str],
+    key: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    value = env.get(key)
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise ValueError(f"{key} must be a number") from error
+    if not math.isfinite(parsed):
+        raise ValueError(f"{key} must be finite")
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{key} must be between {minimum} and {maximum}")
     return parsed
 
 
