@@ -44,6 +44,7 @@ if (-not $RepoIsUiInstall) {
     Copy-Item -LiteralPath (Join-Path $RepoRoot "index.js") -Destination $ExtensionTarget -Force
     Copy-Item -LiteralPath (Join-Path $RepoRoot "style.css") -Destination $ExtensionTarget -Force
     Copy-Item -LiteralPath (Join-Path $RepoRoot "settings.html") -Destination $ExtensionTarget -Force
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "wand.html") -Destination $ExtensionTarget -Force
 }
 New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $ServerPluginTarget -Force | Out-Null

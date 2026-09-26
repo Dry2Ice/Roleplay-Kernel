@@ -134,6 +134,134 @@
     background: rgba(127, 127, 127, 0.18);
 }
 
+/* Status pill rendered outside the settings panel so the kernel is always
+   reachable, even when the extensions drawer is closed. */
+.rpk-status-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    margin: 4px 0;
+    border-radius: 12px;
+    font-size: 0.85em;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(127, 127, 127, 0.35));
+    background: var(--SmartThemeBlurTintColor, rgba(127, 127, 127, 0.12));
+}
+
+.rpk-status-pill[hidden] {
+    display: none;
+}
+
+.rpk-pill-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    background: #9e9e9e;
+}
+
+.rpk-pill-dot[data-state="ok"] {
+    background: #4caf50;
+}
+
+.rpk-pill-dot[data-state="running"] {
+    background: var(--SmartThemeQuoteColor, #4caf50);
+    animation: rpk-pulse 1.2s ease-in-out infinite;
+}
+
+.rpk-pill-dot[data-state="error"] {
+    background: var(--SmartThemeEmColor, #d9534f);
+}
+
+@keyframes rpk-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+.rpk-pill-detail {
+    opacity: 0.75;
+}
+
+.rpk-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    margin: 6px 0;
+    border-radius: 8px;
+    border: 1px solid var(--SmartThemeEmColor, #d9534f);
+    background: rgba(217, 83, 79, 0.12);
+}
+
+.rpk-banner[hidden] {
+    display: none;
+}
+
+.rpk-banner-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.rpk-banner-text {
+    opacity: 0.85;
+    font-size: 0.9em;
+}
+
+.rpk-banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Wand menu entry */
+.rpk-wand-entry {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 8px;
+}
+
+.rpk-wand-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.rpk-wand-label {
+    font-weight: 600;
+    font-size: 0.9em;
+}
+
+.rpk-wand-detail {
+    font-size: 0.8em;
+    opacity: 0.75;
+}
+
+.rpk-wand-progress {
+    height: 5px;
+    border-radius: 3px;
+    overflow: hidden;
+    background: rgba(127, 127, 127, 0.25);
+}
+
+.rpk-wand-bar {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--SmartThemeQuoteColor, #4caf50);
+    transition: width 180ms ease;
+}
+
+.rpk-wand-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
 .roleplay-kernel-settings .rpk-checks {
     margin: 6px 0;
     padding: 8px 10px;

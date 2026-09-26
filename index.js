@@ -43,6 +43,9 @@ const statusRequests = new Map();
 let progressTimer = null;
 let verifiedSidecarBase = null;
 let versionWarningShown = null;
+let wandMounted = false;
+let mountInFlight = null;
+let offlineNotified = false;
 const toasts = [];
 
 function noteToast(kind, message) {
@@ -691,6 +694,145 @@ function renderMetrics(status) {
     }
 }
 
+function kernelState(status) {
+    if (!settings?.enabled) {
+        return { state: 'offline', text: 'Kernel is off' };
+    }
+    if (status?.status === 'running') {
+        const completed = Number(status?.progress?.completed) || 0;
+        const total = Number(status?.progress?.total) || 0;
+        return {
+            state: 'running',
+            text: total > 0 ? `Working ${completed}/${total}` : 'Working',
+        };
+    }
+    if (status?.status === 'offline' || !status) {
+        return { state: 'error', text: 'Sidecar unreachable' };
+    }
+    const pending = Number(status.pending_count) || 0;
+    if (pending > 0) {
+        return { state: 'ok', text: `Confirming ${pending} change(s)` };
+    }
+    return { state: 'ok', text: status.economy_mode ? 'Economy mode' : 'Ready' };
+}
+
+function renderOutsideIndicator(status) {
+    const { state, text } = kernelState(status);
+    const pill = document.querySelector('.rpk-status-pill');
+    if (pill) {
+        pill.hidden = false;
+        pill.dataset.state = state;
+        const dot = pill.querySelector('.rpk-pill-dot');
+        if (dot) {
+            dot.dataset.state = state;
+        }
+        const label = pill.querySelector('.rpk-pill-text');
+        if (label) {
+            label.textContent = 'Roleplay Kernel';
+        }
+        const detail = pill.querySelector('.rpk-pill-detail');
+        if (detail) {
+            detail.textContent = text;
+        }
+    }
+    const dot = document.querySelector('.rpk-wand-entry .rpk-pill-dot');
+    if (dot) {
+        dot.dataset.state = state;
+    }
+    const wandDetail = document.querySelector('.rpk-wand-entry [data-role="detail"]');
+    if (wandDetail) {
+        wandDetail.textContent = text;
+    }
+    const bar = document.querySelector('.rpk-wand-entry [data-role="bar"]');
+    if (bar) {
+        const total = Number(status?.progress?.total) || 0;
+        const completed = Number(status?.progress?.completed) || 0;
+        bar.style.width = total > 0 ? `${Math.min(100, Math.round((completed / total) * 100))}%` : '0';
+    }
+    showBanner(state === 'error');
+}
+
+function showBanner(visible) {
+    const banner = document.querySelector('.rpk-banner');
+    if (!banner) {
+        return;
+    }
+    if (visible && !offlineNotified) {
+        offlineNotified = true;
+        failure('Roleplay Kernel is unavailable — the ST connection was restored');
+    }
+    if (!visible) {
+        offlineNotified = false;
+    }
+    banner.hidden = !visible;
+}
+
+function mountStatusIndicator() {
+    // APP_READY and the initial call can race; mounting twice would leave a
+    // duplicate wand entry with live buttons.
+    if (mountInFlight) {
+        return mountInFlight;
+    }
+    mountInFlight = mountStatusIndicatorInner().finally(() => {
+        mountInFlight = null;
+    });
+    return mountInFlight;
+}
+
+async function mountStatusIndicatorInner() {
+    if (!document.querySelector('.rpk-status-pill')) {        const host = document.getElementById('rm_extensions_block')
+            ?? document.querySelector('#extensions_settings2')
+            ?? document.body;
+        const template = await getContext().renderExtensionTemplateAsync(
+            `third-party/${getExtensionName()}`,
+            'settings',
+        );
+        const parser = new DOMParser();
+        const parsed = parser.parseFromString(template, 'text/html');
+        for (const selector of ['.rpk-status-pill', '.rpk-banner']) {
+            const node = parsed.querySelector(selector);
+            if (node) {
+                host.prepend(node);
+            }
+        }
+        const restart = document.getElementById('rpk_banner_restart');
+        restart?.addEventListener('click', () => void launchRuntime());
+        document.getElementById('rpk_banner_dismiss')?.addEventListener('click', () => {
+            const banner = document.querySelector('.rpk-banner');
+            if (banner) {
+                banner.hidden = true;
+            }
+        });
+    }
+    if (wandMounted) {
+        return;
+    }
+    const menu = document.getElementById('extensionsMenu');
+    if (!menu) {
+        return;
+    }
+    const template = await getContext().renderExtensionTemplateAsync(
+        `third-party/${getExtensionName()}`,
+        'wand',
+    );
+    const holder = document.createElement('div');
+    holder.id = 'roleplay_kernel_wand_container';
+    holder.className = 'extension_container';
+    holder.innerHTML = template;
+    menu.prepend(holder);
+    holder.querySelector('[data-action="launch"]')?.addEventListener('click', () => void launchRuntime());
+    holder.querySelector('[data-action="stop"]')?.addEventListener('click', () => void stopRuntime());
+    holder.querySelector('[data-action="open"]')?.addEventListener('click', () => {
+        const root = document.getElementById('extensions_settings-button');
+        root?.click();
+        window.setTimeout(() => {
+            document.getElementById('rpk_panel_root')?.scrollIntoView({ block: 'center' });
+        }, 300);
+    });
+    wandMounted = true;
+    renderOutsideIndicator(null);
+}
+
 function renderChecks(report) {
     const box = document.getElementById('rpk_checks');
     if (!box) {
@@ -906,9 +1048,10 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
                 current.desynchronized = false;
             }
     saveChatBinding();
-    renderStatus(status);
-    renderProgress(status.progress);
-    renderMetrics(status);
+            renderStatus(status);
+            renderProgress(status.progress);
+            renderMetrics(status);
+            renderOutsideIndicator(status);
             if (status.transcript_reconciled && !current.reconciledNotified) {
                 current.reconciledNotified = true;
                 saveChatBinding();
@@ -930,6 +1073,7 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
             saveChatBinding();
             renderStatus(null);
             renderProgress(null);
+            renderOutsideIndicator({ status: 'offline' });
             consecutiveStatusFailures += 1;
             if (settings?.enabled && consecutiveStatusFailures >= 3) {
                 autoReleaseRouting();
@@ -1383,9 +1527,15 @@ export function onActivate() {
     registerEvents();
     const context = getContext();
     const render = () => void renderUi();
-    context.eventSource.on(context.eventTypes.APP_READY, render);
+    const mount = () => void mountStatusIndicator().catch(() => {});
+    context.eventSource.on(context.eventTypes.APP_READY, () => {
+        render();
+        mount();
+    });
     context.eventSource.on(context.eventTypes.EXTENSION_SETTINGS_LOADED, render);
     render();
+    mount();
+    startProgressPolling();
 }
 
 export function onInstall() {

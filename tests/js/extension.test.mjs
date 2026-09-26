@@ -56,6 +56,63 @@ test('buttons stay wired after repeated activation events', async () => {
     }
 });
 
+test('the status pill and wand entry are mounted outside the panel', async () => {
+    const harness = createHarness();
+    try {
+        await harness.activate();
+        await new Promise(resolve => setTimeout(resolve, 80));
+        const pill = harness.document.querySelector('.rpk-status-pill');
+        assert.ok(pill, 'status pill must be mounted');
+        assert.equal(pill.hidden, false, 'pill must be visible');
+        assert.equal(pill.dataset.state, 'offline', 'a disabled kernel reports offline');
+        const wand = harness.document.getElementById('roleplay_kernel_wand_container');
+        assert.ok(wand, 'wand entry must be mounted');
+        assert.ok(
+            harness.document.querySelector('.rpk-wand-entry [data-action="launch"]'),
+            'wand entry needs a launch button',
+        );
+    } finally {
+        harness.cleanup();
+    }
+});
+
+test('the wand entry is mounted only once', async () => {
+    const harness = createHarness();
+    try {
+        await harness.activate();
+        await harness.context.eventSource.emit('app_ready');
+        await harness.context.eventSource.emit('extension_settings_loaded');
+        await new Promise(resolve => setTimeout(resolve, 60));
+        assert.equal(
+            harness.document.querySelectorAll('#roleplay_kernel_wand_container').length,
+            1,
+        );
+    } finally {
+        harness.cleanup();
+    }
+});
+
+test('the unavailable banner appears when the sidecar is unreachable', async () => {
+    const harness = createHarness({ enabled: true });
+    try {
+        await harness.activate();
+        await new Promise(resolve => setTimeout(resolve, 80));
+        const banner = harness.document.querySelector('.rpk-banner');
+        assert.ok(banner, 'banner must exist');
+        // Enabled but unreachable: the indicator must surface the failure so the
+        // user sees it without opening the extensions drawer.
+        assert.equal(banner.hidden, false, 'banner must appear while the sidecar is down');
+        const pill = harness.document.querySelector('.rpk-status-pill');
+        assert.equal(pill.dataset.state, 'error');
+        assert.ok(
+            harness.toasts.some(([, text]) => String(text).includes('unavailable')),
+            'the failure must be announced',
+        );
+    } finally {
+        harness.cleanup();
+    }
+});
+
 test('the language selector is absent and the language is fixed to English', async () => {
     const harness = createHarness();
     try {

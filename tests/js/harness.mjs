@@ -15,6 +15,9 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 export function createHarness({ enabled = false, integrationKey = 'k'.repeat(44) } = {}) {
     const dom = new JSDOM(
         `<!DOCTYPE html><html><body>
+            <div id="extensionsMenu" class="options-content" style="display: none;">
+                <div id="dice_wand_container" class="extension_container"></div>
+            </div>
             <div id="rm_extensions_block">
                 <div class="extensions_block">
                     <div id="extensions_settings" class="flex1 wide50p"></div>
@@ -36,6 +39,7 @@ export function createHarness({ enabled = false, integrationKey = 'k'.repeat(44)
         HTMLElement: window.HTMLElement,
         Node: window.Node,
         NodeFilter: window.NodeFilter,
+        DOMParser: window.DOMParser,
         CSS: window.CSS ?? { supports: () => false },
         structuredClone,
     };
@@ -142,10 +146,11 @@ export function createHarness({ enabled = false, integrationKey = 'k'.repeat(44)
         CONNECT_API_MAP: {},
         getRequestHeaders: () => ({}),
         renderExtensionTemplateAsync: async (_name, template) => {
-            if (template !== 'settings') {
+            const file = template === 'wand' ? 'wand.html' : 'settings.html';
+            if (template !== 'wand' && template !== 'settings') {
                 throw new Error(`unknown template ${template}`);
             }
-            return fs.readFileSync(path.join(extensionDir(), 'settings.html'), 'utf8');
+            return fs.readFileSync(path.join(extensionDir(), file), 'utf8');
         },
     };
 
