@@ -47,6 +47,8 @@ python -m roleplay_kernel.sidecar --config .\config.json
 - Sidecar получает из профиля `source`, URL, model и `secret-id`, затем сам обращается к ST backend через локальный CSRF-сеанс; сырой API key не передаётся и не читается extension.
 - Если профиль не выбран, используется ручной `upstream_*` из `config.json`.
 - Кнопка `Активировать` переводит Chat Completion source в Custom и включает маршрутизацию.
+- Extension никогда не записывает integration key в постоянные настройки подключения ST: ключ передаётся только в per-request заголовке. Если runtime недоступен три опроса подряд, маршрутизация отключается автоматически, а подключение ST восстанавливается.
+- Выключение расширения в списке extensions вызывает hook `disable`, который восстанавливает исходные source, URL, model и заголовки, поэтому генерация продолжает работать даже без панели.
 - UI-extension передаёт sidecar отдельный transcript snapshot и финальный prompt ST; character card, World Info, Prompt Manager, history, swipes и chat metadata обрабатываются штатно.
 - Kernel использует отдельный session id для каждого чата.
 - High-impact или низкоуверенные изменения появляются как `Pending` и требуют `Подтвердить delta` или `Отклонить delta`.

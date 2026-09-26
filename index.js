@@ -41,6 +41,7 @@ let uiReady = false;
 const statusRequests = new Map();
 let progressTimer = null;
 let verifiedSidecarBase = null;
+let consecutiveStatusFailures = 0;
 
 function getContext() {
     return SillyTavern.getContext();
@@ -718,6 +719,7 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
             saveChatBinding();
             renderStatus(status);
             renderProgress(status.progress);
+            consecutiveStatusFailures = 0;
             if (!silent) {
                 toastr.success('Roleplay Kernel подключён');
             }
@@ -731,6 +733,10 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
             saveChatBinding();
             renderStatus(null);
             renderProgress(null);
+            consecutiveStatusFailures += 1;
+            if (settings?.enabled && consecutiveStatusFailures >= 3) {
+                autoReleaseRouting();
+            }
             if (!silent) {
                 toastr.error(String(error.message || error));
             }
@@ -743,17 +749,55 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
     return request;
 }
 
-function restorePreviousConnection() {
-    const previous = settings.previousConnection;
-    if (!previous) {
+function autoReleaseRouting() {
+    consecutiveStatusFailures = 0;
+    if (!settings?.enabled) {
         return;
+    }
+    settings.enabled = false;
+    stopProgressPolling();
+    if (!restorePreviousConnection()) {
+        stripInjectedIntegrationKey();
+    }
+    saveSettings();
+    renderRuntimeStatus({ running: false });
+    toastr.warning(
+        'Roleplay Kernel: runtime недоступен, маршрутизация отключена. Подключение ST восстановлено.',
+    );
+}
+
+function restorePreviousConnection() {
+    const previous = settings?.previousConnection;
+    if (!previous) {
+        return false;
     }
     const completion = getContext().chatCompletionSettings;
     completion.chat_completion_source = previous.source;
     completion.custom_url = previous.url;
     completion.custom_model = previous.model;
-    completion.custom_prompt_post_processing = previous.postProcessing;
-    completion.custom_include_headers = previous.includeHeaders;
+    completion.custom_prompt_post_processing = previous.postProcessing ?? '';
+    completion.custom_include_headers = previous.includeHeaders ?? '';
+    saveSettings();
+    return true;
+}
+
+function stripInjectedIntegrationKey() {
+    const completion = getContext().chatCompletionSettings;
+    const current = String(completion.custom_include_headers ?? '');
+    if (!current) {
+        return false;
+    }
+    if (!settings?.integrationKey || !current.includes(settings.integrationKey)) {
+        return false;
+    }
+    const cleaned = current
+        .split('\n')
+        .filter(line => !line.includes(settings.integrationKey))
+        .join('\n')
+        .trim();
+    completion.custom_include_headers = cleaned;
+    saveSettings();
+    return true;
 }
 
 function assertRoutingConnection() {
@@ -766,7 +810,7 @@ function assertRoutingConnection() {
         completion.custom_url = validateSidecarUrl(settings.sidecarUrl);
         completion.custom_model = DEFAULT_SETTINGS.model;
         completion.custom_prompt_post_processing = '';
-        completion.custom_include_headers = integrationHeaders(completion.custom_include_headers);
+        stripInjectedIntegrationKey();
     } catch {
         return;
     }
@@ -1157,4 +1201,19 @@ export function onInstall() {
 export function onUpdate() {
     ensureSettings();
     saveSettings();
+}
+
+export function onDisable() {
+    try {
+        settings = getContext().extensionSettings?.[MODULE_NAME] ?? settings;
+        settings.enabled = false;
+        stopProgressPolling();
+        if (!restorePreviousConnection()) {
+            stripInjectedIntegrationKey();
+        }
+        saveSettings();
+        console.info('[RoleplayKernel] disabled: previous ST connection restored');
+    } catch (error) {
+        console.error('[RoleplayKernel] failed to restore connection on disable', error);
+    }
 }

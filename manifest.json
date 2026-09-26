@@ -13,6 +13,7 @@
   "hooks": {
     "activate": "onActivate",
     "install": "onInstall",
-    "update": "onUpdate"
+    "update": "onUpdate",
+    "disable": "onDisable"
   }
 }
