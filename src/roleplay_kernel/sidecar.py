@@ -44,7 +44,7 @@ from .providers import (
 from .summarizer import SummaryConfig, TranscriptSummarizer
 from .utils import ProviderError
 
-SIDECAR_VERSION = "0.10.0"
+SIDECAR_VERSION = "0.11.0"
 PROTOCOL_VERSION = 1
 ENVELOPE_PREFIX = "[ROLEPLAY_KERNEL_ENVELOPE_V1]"
 CONTROL_PREFIX = "[ROLEPLAY_KERNEL_CONTROL_V1]"

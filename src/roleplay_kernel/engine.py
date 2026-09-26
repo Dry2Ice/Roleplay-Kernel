@@ -109,6 +109,11 @@ class EngineConfig:
     turn_budget_seconds: float = 300.0
     post_render_grace_seconds: float = 90.0
     stage_profiles: Mapping[str, str] | None = field(default=None)
+    plan_max_tokens: int = 0
+    extract_max_tokens: int = 0
+    critic_max_tokens: int = 0
+    summarize_max_tokens: int = 0
+    stage_max_calls: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.mode not in {"lite", "fast", "balanced", "strict"}:
@@ -119,6 +124,14 @@ class EngineConfig:
             raise ValueError("context_window must be positive")
         if self.max_output_tokens < 1 or self.max_internal_tokens < 1:
             raise ValueError("token limits must be positive")
+        for name, value in (
+            ("plan_max_tokens", self.plan_max_tokens),
+            ("extract_max_tokens", self.extract_max_tokens),
+            ("critic_max_tokens", self.critic_max_tokens),
+            ("summarize_max_tokens", self.summarize_max_tokens),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
         if (
             isinstance(self.turn_budget_seconds, bool)
             or not math.isfinite(self.turn_budget_seconds)
@@ -131,16 +144,18 @@ class EngineConfig:
             or not 0.0 <= self.post_render_grace_seconds <= 600.0
         ):
             raise ValueError("post_render_grace_seconds must be between 0 and 600")
-        for name, value in (
+        raw_checks: list[tuple[str, object]] = [
             ("plan_temperature", self.plan_temperature),
             ("render_temperature", self.render_temperature),
             ("critic_temperature", self.critic_temperature),
             ("extract_temperature", self.extract_temperature),
             ("repair_temperature", self.repair_temperature),
-        ):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+        ]
+        for name, raw_value in raw_checks:
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
                 raise ValueError(f"{name} must be a finite number")
-            if not math.isfinite(value) or not 0.0 <= value <= 2.0:
+            numeric = float(raw_value)
+            if not math.isfinite(numeric) or not 0.0 <= numeric <= 2.0:
                 raise ValueError(f"{name} must be between 0 and 2")
 
 
@@ -231,6 +246,7 @@ class Engine:
         if self.compiler.token_budget + output_reserve > self.config.context_window:
             raise ValueError("compiler token budget plus output reserve exceeds context window")
         self._pending_commits: dict[tuple[str, str], PendingCommit] = {}
+        self._stage_calls: dict[str, int] = {}
         self._summarizer = summarizer
         self._style_tracker = StyleTracker()
         self._last_turn_metrics = TurnMetrics()
@@ -1239,6 +1255,20 @@ class Engine:
     def _stage_provider(self, phase: str) -> ChatProvider:
         return self._router.provider_for(phase)
 
+    def _stage_token_limit(self, phase: str, fallback: int) -> int:
+        profile = self._router.profile_for(phase)
+        if profile is not None and profile.max_output_tokens is not None:
+            return profile.max_output_tokens
+        config = self.config
+        per_stage = {
+            "plan": config.plan_max_tokens,
+            "extract": config.extract_max_tokens,
+            "critic": config.critic_max_tokens,
+            "summarize": config.summarize_max_tokens,
+        }
+        override = per_stage.get(phase, 0)
+        return override if override > 0 else fallback
+
     def _complete(
         self,
         prompt: PromptPack,
@@ -1255,6 +1285,10 @@ class Engine:
         self._set_progress(phase, len(completions), phase)
         if should_abort is not None and should_abort():
             raise _StageBudgetExceeded(f"stage {phase} exceeded its time budget")
+        call_cap = self.config.stage_max_calls.get(phase)
+        if call_cap is not None and self._stage_calls.get(phase, 0) >= call_cap:
+            raise _StageBudgetExceeded(f"stage {phase} exceeded its call budget")
+        effective_tokens = self._stage_token_limit(phase, max_tokens)
         provider = self._stage_provider(phase)
         completion = provider.complete(
             (
@@ -1262,11 +1296,12 @@ class Engine:
                 ChatMessage(role="user", content=prompt.user),
             ),
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=effective_tokens,
             json_mode=json_mode and self.config.use_json_mode,
             sampling=sampling,
             on_delta=on_delta,
         )
+        self._stage_calls[phase] = self._stage_calls.get(phase, 0) + 1
         self._set_progress(phase, len(completions) + 1, phase)
         if completion.finish_reason not in _ALLOWED_FINISH_REASONS:
             raise ProviderError(

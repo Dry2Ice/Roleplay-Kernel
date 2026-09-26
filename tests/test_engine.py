@@ -25,6 +25,7 @@ from roleplay_kernel import (
     StateOperation,
     UnknownPendingCommitError,
 )
+from roleplay_kernel.engine import _StageBudgetExceeded
 
 
 class ScriptedProvider:
@@ -80,6 +81,98 @@ class BlockingProvider:
             json_mode=json_mode,
             sampling=sampling,
         )
+
+
+class StageBudgetProvider:
+    def __init__(self, response: str = "{}") -> None:
+        self.calls: list[tuple[str, int | None]] = []
+        self._response = response
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+        sampling: Mapping[str, object] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> Completion:
+        self.calls.append((messages[0].content, max_tokens))
+        if on_delta is not None and not json_mode and self._response:
+            on_delta(self._response)
+        return Completion(
+            content=self._response,
+            model="stage-budget",
+            usage={},
+            finish_reason="stop",
+        )
+
+
+class StageBudgetTests(unittest.TestCase):
+    def test_stage_call_cap_blocks_further_calls(self) -> None:
+        provider = StageBudgetProvider()
+        engine = Engine(
+            provider,
+            config=EngineConfig(mode="fast", stage_max_calls={"render": 1}),
+        )
+        session = engine.new_session()
+        engine.advance(session, "First message")
+        with self.assertRaises(_StageBudgetExceeded):
+            engine._complete(
+                engine.compiler.compile_summary("history"),
+                temperature=0.1,
+                max_tokens=100,
+                json_mode=False,
+                completions=[],
+                phase="render",
+            )
+
+    def test_per_stage_token_limit_overrides_fallback(self) -> None:
+        provider = StageBudgetProvider()
+        engine = Engine(
+            provider,
+            config=EngineConfig(
+                mode="balanced",
+                plan_max_tokens=128,
+                extract_max_tokens=256,
+                critic_max_tokens=512,
+            ),
+        )
+        session = engine.new_session()
+        engine.advance(session, "Aria entered the tavern")
+        plan_calls = [item for item in provider.calls if "narrative planner" in item[0]]
+        self.assertEqual(plan_calls[0][1], 128)
+        extract_calls = [item for item in provider.calls if "extract canonical" in item[0]]
+        if extract_calls:
+            self.assertEqual(extract_calls[0][1], 256)
+
+    def test_profile_token_limit_wins_over_engine_config(self) -> None:
+        from roleplay_kernel.profiles import ModelProfile, ProfileRouter
+
+        provider = StageBudgetProvider()
+        fast = StageBudgetProvider()
+        router = ProfileRouter(
+            provider,
+            profiles={"fast": ModelProfile("fast", fast, max_output_tokens=64)},
+            stage_map={"plan": "fast"},
+        )
+        engine = Engine(
+            provider,
+            router=router,
+            config=EngineConfig(mode="balanced", plan_max_tokens=128),
+        )
+        session = engine.new_session()
+        engine.advance(session, "Aria entered the tavern")
+        plan_calls = [item for item in fast.calls if "narrative planner" in item[0]]
+        self.assertEqual(plan_calls[0][1], 64)
+
+    def test_stage_call_counts_tracked_per_phase(self) -> None:
+        provider = StageBudgetProvider()
+        engine = Engine(provider, config=EngineConfig(mode="fast"))
+        session = engine.new_session()
+        engine.advance(session, "Aria entered the tavern")
+        self.assertGreaterEqual(engine._stage_calls.get("render", 0), 1)
 
 
 class EngineTests(unittest.TestCase):
