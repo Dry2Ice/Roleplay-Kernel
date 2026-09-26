@@ -14,6 +14,7 @@ from roleplay_kernel import (
     ContextCompiler,
     Engine,
     EngineConfig,
+    Finding,
     JsonValue,
     ModuleDefinition,
     ModuleDefinitionError,
@@ -531,6 +532,70 @@ class EngineTests(unittest.TestCase):
         findings = engine.audit_state_provenance(session)
         codes = {finding.code for finding in findings}
         self.assertIn("state_orphaned_by_rewrite", codes)
+
+    def test_voice_profile_is_derived_from_the_card_without_extra_calls(self) -> None:
+        engine = Engine(ScriptedProvider([]), config=EngineConfig(mode="lite"))
+        card = (
+            "Aria is a terse engineer. Style: clipped sentences, no filler. "
+            "She doesn't volunteer feelings. Never write her as cheerful. "
+            "Her dialogue is short and technical, therefore she rarely uses "
+            "adverbs."
+        )
+        session = engine.new_session()
+
+        pack = engine.compiler.compile_render(
+            state=session._state,
+            turns=session._turns,
+            user_input="Hello",
+            plan={"goal": "reply"},
+            activations=(),
+            external_context=card,
+        )
+
+        self.assertIn("VOICE_PROFILE_DATA", pack.user)
+        self.assertIn("clipped sentences", pack.user)
+        self.assertIn("median_sentence_words", pack.user)
+        # The profile is derived locally, so no provider call happened.
+        self.assertEqual(engine.metrics.provider_calls, 0)
+
+    def test_critic_receives_only_the_relevant_state_slice(self) -> None:
+        engine = Engine(ScriptedProvider([]), config=EngineConfig(mode="lite"))
+        session = engine.new_session()
+        session._state.facts["the vault code"] = "4711"
+        session._state.facts["the harbour patrol"] = "three ships"
+        session._state.injuries["knee"] = "bruised"
+
+        pack = engine.compiler.compile_critic(
+            state=session._state,
+            plan={"goal": "escape the vault"},
+            candidate="He punched 4711 into the vault keypad and the door opened.",
+            delta=StateDelta(),
+            deterministic_codes=(),
+            activations=(),
+        )
+
+        self.assertIn("RELEVANT_STATE_DATA", pack.user)
+        self.assertIn("the vault code", pack.user)
+        self.assertNotIn("the harbour patrol", pack.user)
+        self.assertNotIn("bruised", pack.user)
+
+    def test_repair_scope_violation_keeps_the_original_post(self) -> None:
+        engine = Engine(ScriptedProvider([]), config=EngineConfig(mode="strict"))
+        original = "First paragraph is fine.\n\nSecond paragraph mentions a speaker label."
+        finding = Finding(
+            severity="hard",
+            code="speaker_label_leak",
+            message="leak",
+            evidence="Second paragraph mentions a speaker label",
+        )
+
+        preserved = engine._repair_scope_preserved(original, original, (finding,))
+        self.assertTrue(preserved, "an unchanged post always preserves its scope")
+
+        rewritten = "Completely new opening.\n\nSecond paragraph mentions a speaker label."
+        self.assertFalse(
+            engine._repair_scope_preserved(original, rewritten, (finding,))
+        )
 
     def test_prompts_carry_elapsed_time_between_turns(self) -> None:
         engine = Engine(ScriptedProvider([]), config=EngineConfig(mode="lite"))

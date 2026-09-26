@@ -533,6 +533,28 @@ class Engine:
                             ),
                         ),
                     )
+                elif not self._repair_scope_preserved(
+                    candidate,
+                    repaired,
+                    candidate_findings,
+                ):
+                    # An over-broad rewrite would discard everything the critic
+                    # approved, so it is reported rather than applied.
+                    repaired = candidate
+                    candidate_findings = merge_findings(
+                        candidate_findings,
+                        (
+                            Finding(
+                                severity="warning",
+                                code="repair_scope_violation",
+                                message=(
+                                    "Repair rewrote paragraphs no finding pointed at; "
+                                    "the original post was kept"
+                                ),
+                                confidence=1.0,
+                            ),
+                        ),
+                    )
                     break
                 candidate = repaired
                 repairs += 1
@@ -1089,6 +1111,38 @@ class Engine:
             candidate=candidate,
             operation_count=len(delta.operations),
         )
+
+    def _repair_scope_preserved(
+        self,
+        original: str,
+        repaired: str,
+        findings: tuple[Finding, ...],
+    ) -> bool:
+        """Check that a repair only touched the paragraphs a finding flagged.
+
+        A repair prompt may still return a fully rewritten post. That costs the
+        user everything the critic approved, so an over-broad repair is rejected
+        and reported instead of silently accepted.
+        """
+        flagged: set[str] = set()
+        for finding in findings:
+            evidence = finding.evidence.strip()
+            if not evidence:
+                continue
+            for paragraph in original.split("\n\n"):
+                if paragraph.strip() and evidence[:120].casefold() in paragraph.casefold():
+                    flagged.add(paragraph.strip())
+                    break
+        if not flagged:
+            return True
+        original_paragraphs = [part.strip() for part in original.split("\n\n") if part.strip()]
+        repaired_text = repaired.casefold()
+        for paragraph in original_paragraphs:
+            if paragraph in flagged:
+                continue
+            if paragraph.casefold() not in repaired_text:
+                return False
+        return True
 
     def _repair(
         self,
