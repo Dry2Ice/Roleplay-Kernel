@@ -116,6 +116,7 @@ $ConfigDefaults = [ordered]@{
     turn_budget_seconds = 300
     post_render_grace_seconds = 90
     require_upstream_profile = $true
+    stage_profiles = [ordered]@{}
 }
 $MergedConfig = $null
 if (Test-Path -LiteralPath $ConfigPath) {

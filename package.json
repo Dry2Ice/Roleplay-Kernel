@@ -1,6 +1,6 @@
 {
   "name": "roleplay-kernel",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "private": true,
   "description": "Dev-only tooling for the Roleplay Kernel ST extension (lint and DOM tests).",
   "type": "module",

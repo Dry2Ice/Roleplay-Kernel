@@ -135,7 +135,24 @@ Commit `39ea16e`. Установлена в ST, проверена, отправ
 | v0.5.0 | `2daea45` | Голос, срез состояния, точечный repair |
 | v0.6.0 | `1cd219d` | Прозрачность решений и понятные подтверждения |
 | v0.6.1 | `c7873bf` | Совместимость сессий после обновления, eagerly-профиль, защита от ухода на чужой API |
-| v0.6.2 | этот | Профиль без custom URL больше не ломает разбор, флаг в диагностике |
+| v0.6.2 | `f7ef3ac` | Профиль без custom URL больше не ломает разбор, флаг в диагностике |
+| v0.7.0 | этот | ProfileRouter: разные модели для разных стадий |
+
+## v0.7.0 — ProfileRouter: разные модели для разных задач  ✅ завершена
+
+- [x] `ProfileRouter` маршрутизирует вызовы по стадиям: render, extract, critic,
+      repair, plan. Каждая стадия может использовать свой профиль с моделью.
+- [x] `Stage` как `StrEnum`, `ModelProfile` с именем, провайдером и лимитами.
+- [x] `Engine._complete` использует `router.provider_for(phase)` вместо
+      единого `self.provider`. Обратная совместимость через `engine.provider`.
+- [x] `SidecarConfig.stage_profiles` — маппинг стадия → профиль из config.json.
+- [x] `ProfileRouter.override/clear_override` для ST-профиля: применяет
+      провайдер ко всем стадиям сразу.
+- [x] Тесты: маршрутизация по стадиям, fallback на default, override,
+      интеграция с Engine.
+- [x] Installer и server-plugin сохраняют `stage_profiles` при обновлении.
+
+Проверено: 116 python-тестов, 13 JS-тестов, mypy, ruff, eslint — зелёные.
 
 ## v0.6.2 — Hotfix по итогам живой проверки  ✅ завершена
 

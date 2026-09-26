@@ -33,6 +33,7 @@ from .engine import (
     UnknownPendingCommitError,
 )
 from .models import ChatMessage, JsonValue, Session, new_id, utc_now
+from .profiles import ProfileRouter
 from .providers import (
     ChatProvider,
     DeltaSink,
@@ -42,7 +43,7 @@ from .providers import (
 )
 from .utils import ProviderError
 
-SIDECAR_VERSION = "0.6.2"
+SIDECAR_VERSION = "0.7.0"
 PROTOCOL_VERSION = 1
 ENVELOPE_PREFIX = "[ROLEPLAY_KERNEL_ENVELOPE_V1]"
 CONTROL_PREFIX = "[ROLEPLAY_KERNEL_CONTROL_V1]"
@@ -125,6 +126,7 @@ class SidecarConfig:
     turn_budget_seconds: float = 300.0
     post_render_grace_seconds: float = 90.0
     require_upstream_profile: bool = False
+    stage_profiles: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path | None = None) -> SidecarConfig:
@@ -241,6 +243,12 @@ class SidecarConfig:
             "RPK_REQUIRE_UPSTREAM_PROFILE",
             _config_bool(data.get("require_upstream_profile"), False),
         )
+        stage_profiles: dict[str, str] = {}
+        raw_stage_profiles = data.get("stage_profiles", {})
+        if isinstance(raw_stage_profiles, dict):
+            for key, value in raw_stage_profiles.items():
+                if isinstance(value, str):
+                    stage_profiles[str(key)] = value
         config = cls(
             host=host,
             port=port,
@@ -262,6 +270,7 @@ class SidecarConfig:
             turn_budget_seconds=turn_budget_seconds,
             post_render_grace_seconds=post_render_grace_seconds,
             require_upstream_profile=require_upstream_profile,
+            stage_profiles=stage_profiles,
         )
         config.validate()
         return config
@@ -692,6 +701,7 @@ class SessionService:
         *,
         provider: ChatProvider | None = None,
         store: SessionStore | None = None,
+        router: ProfileRouter | None = None,
     ) -> None:
         config.validate()
         self.config = config
@@ -705,7 +715,6 @@ class SessionService:
             timeout=float(config.upstream_timeout_seconds),
             allow_insecure_http=config.allow_insecure_http,
         )
-        self._direct_provider = self.provider
         self._profile_provider: STConnectionProfileProvider | None = None
         self._profile_signature: tuple[str, str, str, str, str, str, str] | None = None
         self._generation_lock = threading.RLock()
@@ -714,6 +723,7 @@ class SessionService:
         self._reconciled_sessions: set[str] = set()
         self._aborted_sessions: set[str] = set()
         self._economy_mode_active = False
+        self._router = router or ProfileRouter(self.provider)
         self.engine = Engine(
             self.provider,
             compiler=ContextCompiler(token_budget=config.token_budget),
@@ -725,8 +735,10 @@ class SessionService:
                 max_repairs=config.max_repairs,
                 turn_budget_seconds=config.turn_budget_seconds,
                 post_render_grace_seconds=config.post_render_grace_seconds,
+                stage_profiles=config.stage_profiles,
             ),
             integrity_key=self.store.integrity_key,
+            router=self._router,
         )
 
     def health(self) -> dict[str, JsonValue]:
@@ -931,8 +943,7 @@ class SessionService:
     ) -> None:
         if profile is None:
             if self._profile_signature is not None:
-                self.provider = self._direct_provider
-                self.engine.provider = self._direct_provider
+                self._router.clear_override()
                 self._profile_provider = None
                 self._profile_signature = None
             return
@@ -963,7 +974,7 @@ class SessionService:
         self._profile_provider = provider
         self._profile_signature = signature
         self.provider = provider
-        self.engine.provider = provider
+        self.engine._router.override(provider)
 
     def generate(
         self,

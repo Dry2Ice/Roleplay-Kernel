@@ -7,7 +7,7 @@ import math
 import secrets
 import time
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, cast
 
 from .compiler import ContextCompiler, PromptPack
@@ -20,6 +20,7 @@ from .models import (
     new_id,
 )
 from .modules import ModuleActivation, ModuleRegistry
+from .profiles import ProfileRouter, Stage
 from .providers import ChatProvider
 from .utils import ProviderError, parse_json_object
 from .validators import (
@@ -104,6 +105,7 @@ class EngineConfig:
     repair_temperature: float = 0.3
     turn_budget_seconds: float = 300.0
     post_render_grace_seconds: float = 90.0
+    stage_profiles: Mapping[str, str] | None = field(default=None)
 
     def __post_init__(self) -> None:
         if self.mode not in {"lite", "fast", "balanced", "strict"}:
@@ -203,11 +205,21 @@ class Engine:
         compiler: ContextCompiler | None = None,
         config: EngineConfig | None = None,
         integrity_key: bytes | None = None,
+        router: ProfileRouter | None = None,
     ) -> None:
-        self.provider = provider
+        config = config or EngineConfig()
+        if router is not None:
+            self._router = router
+        elif config.stage_profiles:
+            self._router = ProfileRouter(
+                provider,
+                stage_map=config.stage_profiles,
+            )
+        else:
+            self._router = ProfileRouter(provider)
         self.registry = registry or ModuleRegistry.default()
         self.compiler = compiler or ContextCompiler()
-        self.config = config or EngineConfig()
+        self.config = config
         if integrity_key is not None and len(integrity_key) < 32:
             raise ValueError("integrity_key must contain at least 32 bytes")
         self._integrity_key = integrity_key or secrets.token_bytes(32)
@@ -1178,6 +1190,17 @@ class Engine:
             phase="repair",
         ).content
 
+    @property
+    def provider(self) -> ChatProvider:
+        return self._router.provider_for(Stage.RENDER)
+
+    @property
+    def router(self) -> ProfileRouter:
+        return self._router
+
+    def _stage_provider(self, phase: str) -> ChatProvider:
+        return self._router.provider_for(phase)
+
     def _complete(
         self,
         prompt: PromptPack,
@@ -1194,7 +1217,8 @@ class Engine:
         self._set_progress(phase, len(completions), phase)
         if should_abort is not None and should_abort():
             raise _StageBudgetExceeded(f"stage {phase} exceeded its time budget")
-        completion = self.provider.complete(
+        provider = self._stage_provider(phase)
+        completion = provider.complete(
             (
                 ChatMessage(role="system", content=prompt.system),
                 ChatMessage(role="user", content=prompt.user),
