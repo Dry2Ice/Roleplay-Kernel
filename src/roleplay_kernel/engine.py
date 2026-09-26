@@ -22,6 +22,7 @@ from .models import (
 from .modules import ModuleActivation, ModuleRegistry
 from .profiles import ProfileRouter, Stage
 from .providers import ChatProvider
+from .style import StyleTracker
 from .utils import ProviderError, parse_json_object
 from .validators import (
     DeltaResult,
@@ -227,6 +228,7 @@ class Engine:
         if self.compiler.token_budget + output_reserve > self.config.context_window:
             raise ValueError("compiler token budget plus output reserve exceeds context window")
         self._pending_commits: dict[tuple[str, str], PendingCommit] = {}
+        self._style_tracker = StyleTracker()
         self._last_turn_metrics = TurnMetrics()
         self._first_delta_seconds: float | None = None
         self._render_started_at: float | None = None
@@ -503,6 +505,7 @@ class Engine:
         ).content.strip()
         if not candidate:
             raise RuntimeError("renderer returned an empty post")
+        self._style_tracker.record(candidate)
         if should_abort is not None and should_abort():
             raise ClientGoneError("client disconnected after rendering")
 
@@ -1102,6 +1105,7 @@ class Engine:
             deterministic_codes=tuple(finding.code for finding in deterministic),
             activations=activations,
             external_context=external_context,
+            style_constraints=self._style_tracker.constraints(),
         )
         completion = self._complete(
             prompt,

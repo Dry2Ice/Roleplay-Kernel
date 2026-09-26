@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -163,9 +163,11 @@ class ContextCompiler:
         deterministic_codes: tuple[str, ...],
         activations: tuple[ModuleActivation, ...],
         external_context: str = "",
+        style_constraints: Mapping[str, list[str]] | None = None,
     ) -> PromptPack:
         system = _critic_system(state.language, _render_modules(activations))
         slice_data = _relevant_state_slice(state, candidate, plan)
+        style_section = _style_constraints_section(style_constraints)
         user = (
             f"RELEVANT_STATE_DATA\n{_json(slice_data)}\n\n"
             f"{_external_context_section(external_context)}"
@@ -173,6 +175,7 @@ class ContextCompiler:
             f"CANDIDATE_DATA\n{_json({'content': candidate})}\n\n"
             f"PROPOSED_STATE_DELTA_DATA\n{_json(delta.to_dict())}\n\n"
             f"ALREADY_DETECTED_DATA\n{_json(list(deterministic_codes))}\n\n"
+            f"{style_section}"
             "Return critic findings now. Only state present in RELEVANT_STATE_DATA "
             "may be treated as canon; ignore everything else."
         )
@@ -593,6 +596,19 @@ def _external_context_section(external_context: str) -> str:
     if not external_context.strip():
         return ""
     return f"EXTERNAL_CONTEXT_DATA\n{_json({'content': external_context})}\n\n"
+
+
+def _style_constraints_section(
+    constraints: Mapping[str, list[str]] | None,
+) -> str:
+    if not constraints:
+        return ""
+    return (
+        "STYLE_CONSTRAINTS_DATA\n"
+        f"{_json(constraints)}\n\n"
+        "Avoid repeating openings, semantic markers, and sentence patterns "
+        "listed in STYLE_CONSTRAINTS_DATA.\n\n"
+    )
 
 
 def _render_modules(activations: tuple[ModuleActivation, ...]) -> str:
