@@ -158,6 +158,7 @@ class TurnResult:
     text: str
     plan: dict[str, JsonValue]
     active_modules: tuple[str, ...]
+    module_reasons: dict[str, str]
     module_versions: dict[str, str]
     state_delta: StateDelta
     applied_operations: StateDelta
@@ -179,6 +180,7 @@ class TurnResult:
             "text": self.text,
             "plan": self.plan,
             "active_modules": list(self.active_modules),
+            "module_reasons": dict(sorted(self.module_reasons.items())),
             "module_versions": dict(self.module_versions),
             "state_delta": self.state_delta.to_dict(),
             "applied_operations": self.applied_operations.to_dict(),
@@ -678,6 +680,9 @@ class Engine:
             text=candidate,
             plan=plan,
             active_modules=tuple(activation.definition.id for activation in activations),
+            module_reasons={
+                activation.definition.id: activation.reason for activation in activations
+            },
             module_versions={
                 activation.definition.id: activation.definition.version
                 for activation in activations

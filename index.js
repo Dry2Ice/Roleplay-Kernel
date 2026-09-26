@@ -833,6 +833,114 @@ async function mountStatusIndicatorInner() {
     renderOutsideIndicator(null);
 }
 
+function renderDelta(status) {
+    const box = document.getElementById('rpk_delta');
+    if (!box) {
+        return;
+    }
+    const insights = status?.insights;
+    const pending = Array.isArray(insights?.pending) ? insights.pending : [];
+    box.replaceChildren();
+    if (!pending.length) {
+        return;
+    }
+    for (const item of pending) {
+        if (!item || typeof item !== 'object') {
+            continue;
+        }
+        const row = document.createElement('div');
+        row.className = 'rpk-delta-item';
+        row.dataset.impact = String(item.impact ?? 'low');
+
+        const label = document.createElement('span');
+        label.className = 'rpk-delta-label';
+        label.textContent = String(item.label ?? item.kind ?? 'change');
+        if (item.evidence) {
+            const evidence = document.createElement('span');
+            evidence.className = 'rpk-delta-meta';
+            evidence.textContent = `"${String(item.evidence).slice(0, 90)}"`;
+            label.append(evidence);
+        }
+        row.append(label);
+
+        const actions = document.createElement('span');
+        actions.className = 'rpk-delta-actions';
+        const accept = document.createElement('button');
+        accept.className = 'menu_button';
+        accept.dataset.action = 'accept';
+        accept.title = 'Accept';
+        accept.innerHTML = '<i class="fa-solid fa-check"></i>';
+        const reject = document.createElement('button');
+        reject.className = 'menu_button';
+        reject.dataset.action = 'reject';
+        reject.title = 'Reject';
+        reject.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+        accept.addEventListener('click', () => void runControl('commit'));
+        reject.addEventListener('click', () => void runControl('reject'));
+        actions.append(accept, reject);
+        row.append(actions);
+        box.append(row);
+    }
+}
+
+function renderInsights(status) {
+    const box = document.getElementById('rpk_insights');
+    if (!box) {
+        return;
+    }
+    const insights = status?.insights;
+    box.replaceChildren();
+    if (!insights || typeof insights !== 'object') {
+        return;
+    }
+
+    const addBlock = (title, lines) => {
+        const items = lines.filter(Boolean);
+        if (!items.length) {
+            return;
+        }
+        const block = document.createElement('div');
+        block.className = 'rpk-insight-block';
+        const heading = document.createElement('strong');
+        heading.textContent = title;
+        const list = document.createElement('ul');
+        for (const line of items) {
+            const entry = document.createElement('li');
+            if (typeof line === 'string') {
+                entry.textContent = line;
+            } else {
+                entry.append(line);
+            }
+            list.append(entry);
+        }
+        block.append(heading, list);
+        box.append(block);
+    };
+
+    addBlock('Scene goal', [insights.plan_goal]);
+    addBlock('Active modules', (Array.isArray(insights.modules) ? insights.modules : []).map(
+        module => (module?.reason
+            ? `${module.id} — ${module.reason}`
+            : String(module?.id ?? '')),
+    ));
+    addBlock('Applied changes', (Array.isArray(insights.applied) ? insights.applied : []).map(
+        change => String(change?.label ?? ''),
+    ));
+    addBlock('Critic findings', (Array.isArray(insights.findings) ? insights.findings : [])
+        .map((finding) => {
+            const entry = document.createElement('span');
+            entry.textContent = String(finding?.message ?? '');
+            const code = document.createElement('span');
+            code.className = 'rpk-insight-code';
+            code.textContent = ` [${String(finding?.code ?? '')}]`;
+            entry.append(code);
+            return entry;
+        }));
+    if (Number(insights.repairs) > 0) {
+        addBlock('Repairs', [`${insights.repairs} repair pass(es)`]);
+    }
+}
+
 function renderChecks(report) {
     const box = document.getElementById('rpk_checks');
     if (!box) {
@@ -1052,6 +1160,8 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
             renderProgress(status.progress);
             renderMetrics(status);
             renderOutsideIndicator(status);
+            renderDelta(status);
+            renderInsights(status);
             if (status.transcript_reconciled && !current.reconciledNotified) {
                 current.reconciledNotified = true;
                 saveChatBinding();

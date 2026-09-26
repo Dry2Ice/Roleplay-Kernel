@@ -546,6 +546,57 @@ class SidecarTests(unittest.TestCase):
             self.assertEqual(service.engine.config.mode, "balanced")
             self.assertFalse(service._economy_mode_active)
 
+    def test_operations_are_described_in_plain_language(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=ScriptedProvider(_empty_turn_responses()),
+            )
+            service.generate(
+                _envelope("chat_plain", "Первый ход"),
+                _messages("chat_plain", "Первый ход"),
+                "Character: Aria",
+            )
+            status = service.control("status", {"session_id": "chat_plain"})
+            insights = status["insights"]
+            self.assertIsInstance(insights, dict)
+            if not isinstance(insights, dict):
+                self.fail("insights must be an object")
+            self.assertIn("plan_goal", insights)
+            self.assertIsInstance(insights["modules"], list)
+            self.assertIsInstance(insights["pending"], list)
+            for item in cast(list[JsonValue], insights["pending"]):
+                if not isinstance(item, dict):
+                    continue
+                self.assertIsInstance(item.get("label"), str)
+                self.assertIn("impact", item)
+
+    def test_pending_operations_read_as_sentences(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=_pending_provider(),
+            )
+            service.generate(
+                _envelope("chat_pending_words", "Первый ход"),
+                _messages("chat_pending_words", "Первый ход"),
+                "Character: Aria",
+            )
+            status = service.control("status", {"session_id": "chat_pending_words"})
+            insights = cast(dict[str, JsonValue], status["insights"])
+            pending = cast(list[JsonValue], insights["pending"])
+            self.assertTrue(pending, "the fixture produces a pending delta")
+            labels = [
+                str(item["label"])
+                for item in pending
+                if isinstance(item, dict)
+            ]
+            self.assertTrue(labels)
+            self.assertTrue(
+                all(label and label[0].isupper() for label in labels),
+                f"labels must read as sentences: {labels}",
+            )
+
     def test_streamed_turn_reports_metrics_in_status(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config = _config(Path(temporary))

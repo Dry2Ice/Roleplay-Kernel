@@ -85,6 +85,9 @@
                 <small class="rpk-details">Counted from the start of the previous response.</small>
             </label>
 
+            <div class="rpk-section-title">Pending state changes</div>
+            <div id="rpk_delta" class="rpk-delta"></div>
+
             <div class="rpk-section-title">Diagnostics</div>
             <div class="rpk-actions">
                 <button id="rpk_self_test" class="menu-button"><i class="fa-solid fa-stethoscope"></i><span>Run self-test</span></button>
@@ -93,6 +96,10 @@
             <div id="rpk_checks" class="rpk-checks" hidden></div>
 
             <div class="rpk-section-title">Actions</div>
+            <details class="rpk-advanced">
+                <summary>What the kernel decided</summary>
+                <div id="rpk_insights" class="rpk-insights"></div>
+            </details>
             <div class="rpk-actions">
                 <button id="rpk_approve" class="menu-button" disabled><i class="fa-solid fa-check"></i><span>Confirm delta</span></button>
                 <button id="rpk_reject" class="menu-button" disabled><i class="fa-solid fa-xmark"></i><span>Reject delta</span></button>

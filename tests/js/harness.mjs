@@ -142,6 +142,7 @@ export function createHarness({ enabled = false, integrationKey = 'k'.repeat(44)
         chatMetadata: null,
         uuidv4: () => 'session-under-test',
         saveSettingsDebounced: () => { saves.count += 1; },
+        saveMetadataDebounced: () => { saves.count += 1; },
         saveSettings: async () => { saves.count += 1; },
         CONNECT_API_MAP: {},
         getRequestHeaders: () => ({}),

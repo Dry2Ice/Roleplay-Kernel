@@ -1240,6 +1240,7 @@ class SessionService:
             "transcript_reconciled": session_id in self._reconciled_sessions,
             "metrics": self.engine.metrics.to_dict(),
             "economy_mode": self._economy_mode_active,
+            "insights": _turn_insights(last_result),
         }
 
     def _sync_transcript(
@@ -1286,6 +1287,114 @@ class SessionService:
         for index in range(0, len(items), 2):
             if items[index][0] != "user" or items[index + 1][0] != "assistant":
                 raise SidecarError("transcript_mismatch", "invalid transcript ordering", 409)
+
+
+_OPERATION_LABELS: dict[str, str] = {
+    "set_time": "Time",
+    "set_location": "Location",
+    "set_summary": "Scene summary",
+    "set_scene_tag": "Scene tag",
+    "upsert_fact": "Fact",
+    "upsert_belief": "Belief",
+    "set_relationship": "Relationship",
+    "set_resource": "Resource",
+    "set_injury": "Injury",
+    "open_thread": "Open thread",
+    "resolve_thread": "Resolved thread",
+    "record_event": "Event",
+}
+
+
+def _describe_operation(operation: Mapping[str, JsonValue]) -> str:
+    """Render one state operation as a sentence a player can judge."""
+    kind = str(operation.get("kind", ""))
+    target = str(operation.get("target", "")).strip()
+    value = str(operation.get("value", "")).strip()
+    label = _OPERATION_LABELS.get(kind, kind or "Change")
+    match kind:
+        case "set_time" | "set_location":
+            return f"{label}: {value}"
+        case "set_summary":
+            summary = value if len(value) <= 160 else f"{value[:157]}..."
+            return f"{label} rewritten: {summary}"
+        case "set_scene_tag":
+            return f"{label} +{value}"
+        case "upsert_fact":
+            return f"{label} {target} = {value}"
+        case "upsert_belief":
+            return f"{label} {target} now holds: {value}"
+        case "set_relationship":
+            return f"{label} with {target}: {value}"
+        case "set_injury":
+            return f"{label} {target} — {value}"
+        case "open_thread":
+            return f"{label}: {target}"
+        case "resolve_thread":
+            return f"{label}: {target}"
+        case "record_event":
+            event = value if len(value) <= 160 else f"{value[:157]}..."
+            return f"{label}: {event}"
+    return f"{label} {target}: {value}" if target else f"{label}: {value}"
+
+
+def _delta_preview(delta: Mapping[str, JsonValue]) -> list[JsonValue]:
+    raw = delta.get("operations")
+    operations = raw if isinstance(raw, list) else []
+    preview: list[JsonValue] = []
+    for item in operations:
+        if not isinstance(item, dict):
+            continue
+        preview.append(
+            {
+                "kind": str(item.get("kind", "")),
+                "label": _describe_operation(item),
+                "impact": str(item.get("impact", "low")),
+                "certainty": item.get("certainty", 0.0),
+                "evidence": str(item.get("evidence", ""))[:200],
+            }
+        )
+    return preview
+
+
+def _turn_insights(last_result: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Everything the user needs to judge what the kernel decided this turn."""
+    plan = last_result.get("plan")
+    plan_goal = ""
+    if isinstance(plan, dict):
+        raw_goal = plan.get("goal")
+        plan_goal = str(raw_goal) if isinstance(raw_goal, str) else ""
+    reasons = last_result.get("module_reasons")
+    module_map = reasons if isinstance(reasons, dict) else {}
+    raw_modules = last_result.get("active_modules")
+    module_names = raw_modules if isinstance(raw_modules, list) else []
+    modules: list[JsonValue] = []
+    for name in module_names:
+        if not isinstance(name, str):
+            continue
+        modules.append({"id": name, "reason": str(module_map.get(name, ""))})
+    raw_findings = last_result.get("findings")
+    finding_items = raw_findings if isinstance(raw_findings, list) else []
+    findings: list[JsonValue] = []
+    for item in finding_items:
+        if not isinstance(item, dict):
+            continue
+        findings.append(
+            {
+                "severity": str(item.get("severity", "warning")),
+                "code": str(item.get("code", "")),
+                "message": str(item.get("message", ""))[:240],
+            }
+        )
+    applied = last_result.get("applied_operations")
+    pending = last_result.get("pending_operations")
+    return {
+        "plan_goal": plan_goal,
+        "modules": modules,
+        "findings": findings,
+        "repairs": last_result.get("repairs", 0),
+        "applied": _delta_preview(applied) if isinstance(applied, dict) else [],
+        "pending": _delta_preview(pending) if isinstance(pending, dict) else [],
+    }
 
 
 class AuthThrottle:

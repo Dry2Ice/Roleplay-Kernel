@@ -113,6 +113,76 @@ test('the unavailable banner appears when the sidecar is unreachable', async () 
     }
 });
 
+test('pending state changes render as sentences with accept and reject', async () => {
+    const harness = createHarness({ enabled: true });
+    try {
+        await harness.activate();
+        globalThis.fetch = async (url) => {
+            if (String(url).endsWith('/health')) {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ status: 'ok', service: 'roleplay-kernel-sidecar', version: '0.2.0' }),
+                };
+            }
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    choices: [{
+                        message: {
+                            content: JSON.stringify({
+                                session_id: 's1',
+                                version: '0.2.0',
+                                exists: true,
+                                state_version: 3,
+                                pending_request_id: 'r1',
+                                pending_count: 1,
+                                status: 'needs_confirmation',
+                                progress: { active: false, phase: 'done', completed: 4, total: 4 },
+                                insights: {
+                                    plan_goal: 'escape the vault',
+                                    modules: [{ id: 'injury_tracking', reason: 'knee is injured' }],
+                                    findings: [],
+                                    repairs: 0,
+                                    applied: [{ label: 'Location: the vault' }],
+                                    pending: [{
+                                        label: 'Injury knee — bleeding',
+                                        impact: 'high',
+                                        evidence: 'knee was bleeding',
+                                    }],
+                                },
+                            }),
+                        },
+                    }],
+                }),
+            };
+        };
+        harness.context.chatMetadata = {
+            roleplay_kernel: {
+                schemaVersion: 1, sessionId: 's1', stateVersion: 0, pendingCount: 0,
+                pendingRequestId: null, status: 'idle', desynchronized: false,
+            },
+        };
+        await harness.context.eventSource.emit('message_received');
+        await new Promise(resolve => setTimeout(resolve, 150));
+
+        const delta = harness.document.getElementById('rpk_delta');
+        const rows = delta.querySelectorAll('.rpk-delta-item');
+        assert.equal(rows.length, 1, 'one pending change must be shown');
+        assert.match(rows[0].textContent, /Injury knee — bleeding/);
+        assert.equal(rows[0].dataset.impact, 'high');
+        assert.ok(rows[0].querySelector('[data-action="accept"]'), 'accept button missing');
+        assert.ok(rows[0].querySelector('[data-action="reject"]'), 'reject button missing');
+
+        const insights = harness.document.getElementById('rpk_insights');
+        assert.match(insights.textContent, /escape the vault/);
+        assert.match(insights.textContent, /injury_tracking/);
+    } finally {
+        harness.cleanup();
+    }
+});
+
 test('the language selector is absent and the language is fixed to English', async () => {
     const harness = createHarness();
     try {
