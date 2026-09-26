@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roleplay-kernel"
-version = "0.6.1"
+version = "0.6.2"
 description = "Portable stateful runtime for API-driven roleplay generation"
 requires-python = ">=3.11"
 license = "MIT"

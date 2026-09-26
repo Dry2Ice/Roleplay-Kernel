@@ -134,7 +134,33 @@ Commit `39ea16e`. Установлена в ST, проверена, отправ
 | v0.4.0 | `2f5e12f` | Superseded-реплики, provenance, время |
 | v0.5.0 | `2daea45` | Голос, срез состояния, точечный repair |
 | v0.6.0 | `1cd219d` | Прозрачность решений и понятные подтверждения |
-| v0.6.1 | этот | Совместимость сессий после обновления, eagerly-профиль, защита от ухода на чужой API |
+| v0.6.1 | `c7873bf` | Совместимость сессий после обновления, eagerly-профиль, защита от ухода на чужой API |
+| v0.6.2 | этот | Профиль без custom URL больше не ломает разбор, флаг в диагностике |
+
+## v0.6.2 — Hotfix по итогам живой проверки  ✅ завершена
+
+Третий баг, найденный при live-проверке нового `select_profile`:
+
+`STProfileConfig.from_dict` требовал непустую строку в `api_url` и `secret_id`.
+Расширение отправляет `api_url: String(profile['api-url'] || '')`, то есть
+**пустую строку** для любого профиля без custom endpoint. Такой профиль ронял
+разбор — и в `select_profile`, и в конверте генерации.
+
+- `_config_string` получил `allow_empty`; пустое значение означает «resolve через
+  ST», а не «ошибка формата».
+- Валидация провайдера не ослаблена: `custom` без URL по-прежнему отвергается.
+- `require_upstream_profile` добавлен в отчёт `diagnostics`, иначе его влияние на
+  поведение не видно.
+
+**Живая проверка после установки (ST, реальный файл сессии):**
+
+- `status` по сессии, записанной старой версией → `exists=true`,
+  `state_version=2`, `insights` на месте. Прежде было `400`.
+- `select_profile` → `provider=STConnectionProfileProvider`.
+- `self_test upstream_profile` → `ok=true`. Прежде был ложный `false`.
+- `diagnostics.upstream.provider` → `STConnectionProfileProvider` вместо
+  `OpenAICompatibleProvider` с `api.openai.com`.
+
 
 ## v0.6.1 — Исправления, найденные живой диагностикой  ✅ завершена
 

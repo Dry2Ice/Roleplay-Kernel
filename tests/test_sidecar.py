@@ -794,6 +794,19 @@ class SidecarTests(unittest.TestCase):
                 )
             self.assertEqual(context.exception.code, "upstream_profile_required")
 
+    def test_profile_without_custom_endpoint_accepts_empty_optional_fields(self) -> None:
+        # The extension sends empty strings when a profile has no custom URL.
+        parsed = STProfileConfig.from_dict({
+            "profile_id": "profile-1",
+            "st_base_url": "http://127.0.0.1:8000",
+            "source": "claude",
+            "api_url": "",
+            "model": "profile-model",
+            "secret_id": "",
+        })
+        self.assertEqual(parsed.api_url, "")
+        self.assertEqual(parsed.secret_id, "")
+
     def test_non_loopback_host_header_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config = _config(Path(temporary))

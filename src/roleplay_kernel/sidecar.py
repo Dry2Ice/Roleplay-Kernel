@@ -42,7 +42,7 @@ from .providers import (
 )
 from .utils import ProviderError
 
-SIDECAR_VERSION = "0.6.1"
+SIDECAR_VERSION = "0.6.2"
 PROTOCOL_VERSION = 1
 ENVELOPE_PREFIX = "[ROLEPLAY_KERNEL_ENVELOPE_V1]"
 CONTROL_PREFIX = "[ROLEPLAY_KERNEL_CONTROL_V1]"
@@ -385,9 +385,11 @@ class STProfileConfig:
         profile_id = _required_string(data, "profile_id")
         st_base_url = _required_string(data, "st_base_url")
         source = _required_string(data, "source")
-        api_url = _config_string(data.get("api_url"), "")
+        # An ST profile without a custom endpoint sends empty strings here, and
+        # the sidecar resolves the URL itself, so empty is a valid value.
+        api_url = _config_string(data.get("api_url"), "", allow_empty=True)
         model = _required_string(data, "model")
-        secret_id = _config_string(data.get("secret_id"), "")
+        secret_id = _config_string(data.get("secret_id"), "", allow_empty=True)
         if len(profile_id) > 128 or len(source) > 64 or len(model) > 256:
             raise SidecarError("invalid_profile", "connection profile fields are too long")
         if len(api_url) > 2048 or len(secret_id) > 256:
@@ -772,6 +774,7 @@ class SessionService:
                 "turn_budget_seconds": config.turn_budget_seconds,
                 "post_render_grace_seconds": config.post_render_grace_seconds,
                 "allow_insecure_http": config.allow_insecure_http,
+                "require_upstream_profile": config.require_upstream_profile,
                 "state_dir": str(config.state_dir),
             },
             "upstream": {
@@ -2264,12 +2267,20 @@ def _required_string(data: dict[str, JsonValue], key: str) -> str:
     return value.strip()
 
 
-def _config_string(value: JsonValue | None, default: str) -> str:
+def _config_string(
+    value: JsonValue | None,
+    default: str,
+    *,
+    allow_empty: bool = False,
+) -> str:
     if value is None:
         return default
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
+        raise ValueError("config string values must be strings")
+    text = value.strip()
+    if not text and not allow_empty:
         raise ValueError("config string values must be non-empty strings")
-    return value.strip()
+    return text
 
 
 def _config_int(value: JsonValue | None, default: int) -> int:
