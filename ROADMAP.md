@@ -19,34 +19,40 @@ node --test tests/js/*.test.mjs      # JS-регрессии
 
 ---
 
-## v0.1.1 — Базовый уровень надёжности и безопасности
+## v0.1.1 — Базовый уровень надёжности и безопасности  ✅ завершена
 
-Цель: убрать класс отказов, который стоил пользователю рабочей генерации, и закрыть
-локальный HTTP-сервер.
+Commit `39ea16e`. Установлена в ST, проверена, отправлена в GitHub.
 
-- [ ] Валидация `Host` в sidecar (защита от DNS-rebinding через браузер).
-- [ ] Throttle неудачных авторизаций на sidecar.
-- [ ] Heartbeat и авто-рестарт sidecar в server plugin.
-- [ ] Version handshake: extension сверяет версию sidecar и предупреждает при расхождении.
-- [ ] Регрессия-тест «integration key никогда не попадает в настройки подключения ST».
-- [ ] ESLint (`sourceType: module`) — ловит синтаксис, который пропускает `node --check`.
-- [ ] jsdom-harness переносится в репозиторий как настоящий тест.
-- [ ] CI workflow: ruff, mypy, unittest, ESM-парс, harness, JS-тесты.
+- [x] Валидация `Host` в sidecar (защита от DNS-rebinding через браузер).
+- [x] Throttle неудачных авторизаций на sidecar.
+- [x] Heartbeat и авто-рестарт sidecar в server plugin.
+- [x] Endpoint `POST /api/plugins/roleplay-kernel/restart`.
+- [x] Version handshake: extension сверяет версию sidecar и предупреждает при расхождении.
+- [x] Регрессия-тест «integration key никогда не попадает в настройки подключения ST».
+- [x] ESLint (`sourceType: module`) — ловит синтаксис, который пропускает `node --check`.
+- [x] jsdom-harness перенесён в репозиторий как настоящий тест (`tests/js`).
+- [x] CI workflow: ruff, mypy, unittest, ESM-парс, harness, JS-тесты.
+- [x] Скрипт `scripts/bump_version.py` для единого подъёма версии.
 
-Контрольная точка: установка в ST, проверка панели и запуска runtime.
+Проверено: 90 python-тестов, 6 JS-тестов, mypy, ruff, eslint, ESM-парс — зелёные.
 
-## v0.2.0 — Streaming, отмена, бюджеты по этапам
+## v0.2.0 — Streaming, отмена, бюджеты по этапам  ✅ завершена
 
-Цель: убрать ожидание, которое сейчас равно сумме четырёх последовательных вызовов, и
-перестать жечь квоту при отмене генерации.
+- [x] `DeltaSink` в протоколе `ChatProvider` и обоих провайдерах.
+- [x] Разбор SSE в провайдерах (`_read_sse_stream`) с лимитом размера и `finish_reason`.
+- [x] `on_delta` в `Engine.advance` только для render-этапа.
+- [x] `_SseWriter`: стриминг в ST, детект разрыва соединения, ошибки как SSE-событие.
+- [x] `ClientGoneError` + `_aborting_sink`: Stop в ST отменяет ход, а не жжёт квоту.
+- [x] Бюджет хода `turn_budget_seconds` и `post_render_grace_seconds` в конфиге.
+- [x] Деградация без потери ответа: `planner_skipped`, `extract_skipped`,
+      `critic_skipped`, `state_frozen` вместо потери поста.
+- [x] `TurnMetrics`: provider_calls, first_token, render_seconds, total_seconds.
+- [x] Автоматический downgrade в `Lite` по истории 429 + индикация в панели.
+- [x] Метрики в панели: calls, first token, total.
+- [x] `scripts/bump_version.py` переписан: ищет версию регуляркой, идемпотентен.
+- [x] Версия 0.2.0 синхронно в `pyproject.toml`, `sidecar.py`, `index.js`, `manifest.json`.
 
-- [ ] SSE-стриминг render-этапа: текст уходит в ST по мере генерации.
-- [ ] Экстракция и критик выполняются после отдачи текста, не блокируя показ.
-- [ ] Отмена upstream-запроса при разрыве соединения клиентом (Stop в ST).
-- [ ] Бюджет на ход: таймаут по этапам вместо одного общего; деградация без потери ответа.
-- [ ] Счётчики запросов и времени в status + отображение в панели.
-- [ ] Автоматический downgrade в `Lite` по истории 429.
-
+Проверено: 94 python-теста, 6 JS-тестов, mypy, ruff, eslint, ESM-парс — зелёные.
 Контрольная точка: установка в ST, замер времени до первого токена.
 
 ## v0.3.0 — Наблюдаемость

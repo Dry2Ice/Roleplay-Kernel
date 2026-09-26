@@ -116,6 +116,24 @@
     margin: 4px 0 0;
 }
 
+.roleplay-kernel-settings .rpk-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 6px 0 2px;
+}
+
+.roleplay-kernel-settings .rpk-metrics[hidden] {
+    display: none;
+}
+
+.roleplay-kernel-settings .rpk-metric {
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 0.8em;
+    background: rgba(127, 127, 127, 0.18);
+}
+
 .roleplay-kernel-settings .rpk-section-title {
     margin: 12px 0 4px;
     padding-top: 8px;

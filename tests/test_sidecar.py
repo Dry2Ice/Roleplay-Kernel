@@ -519,6 +519,73 @@ class SidecarTests(unittest.TestCase):
             self.assertEqual(provider.calls, 1)
             self.assertIn("chat_gone", service._aborted_sessions)
 
+    def test_rate_limited_profile_drops_the_turn_into_lite_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=ScriptedProvider(_empty_turn_responses()),
+            )
+            provider = STConnectionProfileProvider(
+                st_base_url="http://127.0.0.1:8000",
+                source="custom",
+                api_url="https://api.example.test/v1",
+                model="test-model",
+                secret_id="secret",
+            )
+            service._profile_provider = provider
+
+            object.__setattr__(provider, "rate_limited", True)
+            service._apply_mode("balanced")
+            self.assertEqual(service.engine.config.mode, "lite")
+            self.assertTrue(service._economy_mode_active)
+            status = service.control("status", {"session_id": "chat_economy"})
+            self.assertTrue(status["economy_mode"])
+
+            object.__setattr__(provider, "rate_limited", False)
+            service._apply_mode("balanced")
+            self.assertEqual(service.engine.config.mode, "balanced")
+            self.assertFalse(service._economy_mode_active)
+
+    def test_streamed_turn_reports_metrics_in_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = _config(Path(temporary))
+            provider = ScriptedProvider(_empty_turn_responses())
+            service = SessionService(config, provider=provider)
+            server = create_server(config, service)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            host_value, port_value = server.server_address[:2]
+            host = host_value.decode("utf-8") if isinstance(host_value, bytes) else host_value
+            port = int(port_value)
+            try:
+                stream_messages = _message_dicts(_messages("chat_metrics", "Я осматриваюсь"))
+                body = _request_text(
+                    f"http://{host}:{port}/v1/chat/completions",
+                    TEST_INTEGRATION_KEY,
+                    {
+                        "model": "roleplay-kernel",
+                        "messages": cast(JsonValue, stream_messages),
+                        "stream": True,
+                    },
+                )
+                self.assertIn("data: [DONE]", body)
+                self.assertEqual(
+                    "".join(_sse_text_deltas(body)),
+                    "Вокруг была пустая станция.",
+                )
+                status = service.control("status", {"session_id": "chat_metrics"})
+                metrics = status["metrics"]
+                self.assertIsInstance(metrics, dict)
+                if not isinstance(metrics, dict):
+                    self.fail("metrics must be an object")
+                self.assertEqual(metrics["provider_calls"], 4)
+                self.assertTrue(metrics["streamed"])
+                self.assertIsNotNone(metrics["first_token_seconds"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     def test_non_loopback_host_header_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config = _config(Path(temporary))

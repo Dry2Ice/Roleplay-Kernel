@@ -4,7 +4,7 @@ const ENVELOPE_PREFIX = '[ROLEPLAY_KERNEL_ENVELOPE_V1]';
 const CONTROL_PREFIX = '[ROLEPLAY_KERNEL_CONTROL_V1]';
 const CONTROL_MODEL_PREFIX = 'roleplay-kernel-control/';
 const RUNTIME_PLUGIN_ID = 'roleplay-kernel';
-const EXTENSION_VERSION = '0.1.1';
+const EXTENSION_VERSION = '0.2.0';
 const SUPPORTED_GENERATIONS = new Set(['normal', 'regenerate', 'swipe']);
 const SUPPORTED_PROFILE_SOURCES = new Set(['openai', 'custom']);
 const SAMPLING_FIELDS = [
@@ -615,6 +615,7 @@ function renderStatus(status) {
     const hard = findings.filter(item => item?.severity === 'hard').length;
     details.textContent = [
         status.transcript_matches === false ? 'Transcript out of sync' : null,
+        status.economy_mode ? 'Economy mode (rate limited upstream)' : null,
         `Mode: ${status.status || 'idle'}`,
         `Modules: ${Array.isArray(status.active_modules) ? status.active_modules.length : 0}`,
         `Critic errors: ${hard}`,
@@ -628,6 +629,37 @@ function renderStatus(status) {
             pending > 0 ? `awaiting confirmation: ${pending}` : 'ready',
             'ok',
         );
+    }
+}
+
+function formatSeconds(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return '—';
+    }
+    return value < 10 ? `${value.toFixed(1)}s` : `${Math.round(value)}s`;
+}
+
+function renderMetrics(status) {
+    const box = document.getElementById('rpk_metrics');
+    const calls = document.getElementById('rpk_metrics_calls');
+    const first = document.getElementById('rpk_metrics_first');
+    const total = document.getElementById('rpk_metrics_total');
+    const metrics = status?.metrics;
+    if (!box || !metrics || typeof metrics !== 'object') {
+        if (box) {
+            box.hidden = true;
+        }
+        return;
+    }
+    box.hidden = false;
+    if (calls) {
+        calls.textContent = `calls ${metrics.provider_calls ?? 0}`;
+    }
+    if (first) {
+        first.textContent = `first token ${formatSeconds(metrics.first_token_seconds)}`;
+    }
+    if (total) {
+        total.textContent = `total ${formatSeconds(metrics.total_seconds)}`;
     }
 }
 
@@ -743,9 +775,10 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
             if (status.transcript_matches === true) {
                 current.desynchronized = false;
             }
-            saveChatBinding();
-            renderStatus(status);
-            renderProgress(status.progress);
+    saveChatBinding();
+    renderStatus(status);
+    renderProgress(status.progress);
+    renderMetrics(status);
             if (status.transcript_reconciled && !current.reconciledNotified) {
                 current.reconciledNotified = true;
                 saveChatBinding();

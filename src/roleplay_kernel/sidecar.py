@@ -40,7 +40,7 @@ from .providers import (
 )
 from .utils import ProviderError
 
-SIDECAR_VERSION = "0.1.1"
+SIDECAR_VERSION = "0.2.0"
 PROTOCOL_VERSION = 1
 ENVELOPE_PREFIX = "[ROLEPLAY_KERNEL_ENVELOPE_V1]"
 CONTROL_PREFIX = "[ROLEPLAY_KERNEL_CONTROL_V1]"
@@ -691,6 +691,7 @@ class SessionService:
         self._active_session_id: str | None = None
         self._reconciled_sessions: set[str] = set()
         self._aborted_sessions: set[str] = set()
+        self._economy_mode_active = False
         self.engine = Engine(
             self.provider,
             compiler=ContextCompiler(token_budget=config.token_budget),
@@ -719,6 +720,17 @@ class SessionService:
         }
 
     def _apply_mode(self, mode: EngineMode) -> None:
+        if self._profile_provider is not None and self._profile_provider.rate_limited:
+            # The upstream refused the previous turn. Retrying a four-call
+            # pipeline would only fail again, so the turn degrades to a single
+            # render call instead of surfacing an error the user cannot fix.
+            if mode != "lite":
+                mode = "lite"
+                with self._active_lock:
+                    self._economy_mode_active = True
+        elif mode != "lite":
+            with self._active_lock:
+                self._economy_mode_active = False
         if self.engine.config.mode != mode:
             self.engine.config = replace(self.engine.config, mode=mode)
 
@@ -1077,6 +1089,7 @@ class SessionService:
                 "last_result": {},
                 "progress": self.engine.progress,
                 "transcript_reconciled": session_id in self._reconciled_sessions,
+                "economy_mode": self._economy_mode_active,
             }
         last_result = record.last_result or {}
         pending_value = last_result.get("pending_operations")
@@ -1103,6 +1116,7 @@ class SessionService:
             "context_hash": record.context_hash,
             "transcript_reconciled": session_id in self._reconciled_sessions,
             "metrics": self.engine.metrics.to_dict(),
+            "economy_mode": self._economy_mode_active,
         }
 
     def _sync_transcript(

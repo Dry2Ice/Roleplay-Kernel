@@ -325,6 +325,7 @@ class STConnectionProfileProvider:
     _rate_limit_until: float = field(init=False, default=0.0, repr=False, compare=False)
     _next_request_at: float = field(init=False, default=0.0, repr=False, compare=False)
     _lock: RLock = field(init=False, repr=False, compare=False)
+    rate_limited: bool = field(init=False, default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         normalized_base = _validate_st_base_url(self.st_base_url)
@@ -361,6 +362,9 @@ class STConnectionProfileProvider:
         )
         object.__setattr__(self, "_lock", RLock())
 
+    @property
+    def recently_rate_limited(self) -> bool:
+        return self._rate_limit_until > time.monotonic()
     def complete(
         self,
         messages: Sequence[ChatMessage],
@@ -386,7 +390,7 @@ class STConnectionProfileProvider:
                 self._wait_for_rate_limit()
                 self._wait_for_inter_request()
                 try:
-                    return self._post(
+                    completion = self._post(
                         messages,
                         token,
                         temperature,
@@ -397,10 +401,13 @@ class STConnectionProfileProvider:
                     )
                 except _STCsrfError:
                     token = self._fetch_csrf_token()
+                    continue
                 except _RateLimitedError:
+                    object.__setattr__(self, "rate_limited", True)
                     if rate_limit_retries >= 2:
                         raise
                     rate_limit_retries += 1
+                    continue
                 except _EmptyContentError:
                     if retried_empty:
                         raise
@@ -409,6 +416,9 @@ class STConnectionProfileProvider:
                     retry_sampling = dict(sampling or {})
                     retry_sampling["max_tokens"] = max_tokens
                     sampling = retry_sampling
+                    continue
+                object.__setattr__(self, "rate_limited", False)
+                return completion
 
     def _mark_response_started(self) -> None:
         if self.inter_request_delay_seconds > 0:

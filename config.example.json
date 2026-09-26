@@ -15,5 +15,7 @@
   "upstream_timeout_seconds": 600,
   "max_repairs": 1,
   "max_context_chars": 16000,
-  "allow_insecure_http": false
+  "allow_insecure_http": false,
+  "turn_budget_seconds": 300,
+  "post_render_grace_seconds": 90
 }
