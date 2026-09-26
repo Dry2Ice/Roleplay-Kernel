@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import unicodedata
@@ -30,7 +31,7 @@ from .engine import (
     StaleTurnResultError,
     UnknownPendingCommitError,
 )
-from .models import JsonValue, Session, new_id
+from .models import ChatMessage, JsonValue, Session, new_id, utc_now
 from .providers import (
     ChatProvider,
     DeltaSink,
@@ -94,6 +95,10 @@ class KernelServiceProtocol(Protocol):
     def control(self, action: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]: ...
 
     def health(self) -> dict[str, JsonValue]: ...
+
+    def diagnostics(self) -> dict[str, JsonValue]: ...
+
+    def self_test(self) -> dict[str, JsonValue]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -591,6 +596,12 @@ class SessionStore:
     def integrity_key(self) -> bytes:
         return self._integrity_key
 
+    def session_count(self) -> int:
+        try:
+            return sum(1 for item in self.root.glob("*.json") if item.stem != "integrity")
+        except OSError:
+            return 0
+
     def load(self, session_id: str) -> SessionRecord | None:
         path = self._record_path(session_id)
         if not path.exists():
@@ -717,6 +728,114 @@ class SessionService:
                 self._profile_signature[0] if self._profile_signature is not None else None
             ),
             "metrics": self.engine.metrics.to_dict(),
+        }
+
+    def diagnostics(self) -> dict[str, JsonValue]:
+        """Collect everything needed to explain a failure in one message.
+
+        Secrets never appear here: the integration key, upstream keys and
+        cookies are reduced to presence flags, not values.
+        """
+        config = self.config
+        provider = self.provider
+        return {
+            "generated_at": utc_now(),
+            "sidecar": {
+                "version": SIDECAR_VERSION,
+                "protocol": PROTOCOL_VERSION,
+                "host": config.host,
+                "port": config.port,
+                "python": sys.version.split()[0],
+                "pid": os.getpid(),
+            },
+            "config": {
+                "mode": config.mode,
+                "upstream_base_url": config.upstream_base_url,
+                "upstream_model": config.upstream_model,
+                "upstream_api_key_present": bool(config.upstream_api_key_env),
+                "token_parameter": config.upstream_token_parameter,
+                "context_window": config.context_window,
+                "token_budget": config.token_budget,
+                "max_output_tokens": config.max_output_tokens,
+                "max_internal_tokens": config.max_internal_tokens,
+                "upstream_timeout_seconds": config.upstream_timeout_seconds,
+                "max_repairs": config.max_repairs,
+                "turn_budget_seconds": config.turn_budget_seconds,
+                "post_render_grace_seconds": config.post_render_grace_seconds,
+                "allow_insecure_http": config.allow_insecure_http,
+                "state_dir": str(config.state_dir),
+            },
+            "upstream": {
+                "provider": type(provider).__name__,
+                "profile_id": (
+                    self._profile_signature[0] if self._profile_signature is not None else None
+                ),
+                "rate_limited": bool(getattr(provider, "rate_limited", False)),
+                "model": getattr(provider, "model", None),
+            },
+            "runtime": {
+                "engine_mode": self.engine.config.mode,
+                "economy_mode": self._economy_mode_active,
+                "metrics": self.engine.metrics.to_dict(),
+                "sessions": self.store.session_count(),
+                "state_dir_exists": config.state_dir.exists(),
+            },
+            "limits": {
+                "max_request_bytes": MAX_REQUEST_BYTES,
+                "max_context_chars": MAX_CONTEXT_CHARS,
+            },
+        }
+
+    def self_test(self) -> dict[str, JsonValue]:
+        """Verify every layer the extension depends on, cheapest check first.
+
+        The upstream probe is a single token request so the test stays inside a
+        provider's rate limit. Failures are reported instead of raised so the
+        panel can show every broken layer at once.
+        """
+        checks: list[JsonValue] = []
+
+        def record(name: str, ok: bool, detail: str = "") -> None:
+            checks.append({"name": name, "ok": ok, "detail": detail})
+
+        record(
+            "state_dir",
+            self.config.state_dir.exists() and os.access(self.config.state_dir, os.W_OK),
+            str(self.config.state_dir),
+        )
+        record(
+            "integration_key",
+            len(self.config.integration_key) >= 32,
+            f"{len(self.config.integration_key)} chars",
+        )
+        record("upstream_profile", self._profile_provider is not None, type(self.provider).__name__)
+
+        upstream_detail = "not probed"
+        if self._profile_provider is not None:
+            try:
+                probe = self.provider.complete(
+                    (ChatMessage(role="user", content="Reply with the single word: ok"),),
+                    temperature=0.0,
+                    max_tokens=16,
+                )
+                upstream_ok = bool(probe.content.strip())
+                upstream_detail = probe.content.strip()[:40] or "empty response"
+            except Exception as error:  # reported, never raised: the test lists all layers
+                upstream_ok = False
+                upstream_detail = str(error)[:200]
+            record("upstream_reachable", upstream_ok, upstream_detail)
+
+        return {
+            "ok": all(
+                bool(check.get("ok"))
+                for check in checks
+                if isinstance(check, dict)
+            ),
+            "checks": checks,
+            "version": SIDECAR_VERSION,
+            "upstream_profile_id": (
+                self._profile_signature[0] if self._profile_signature is not None else None
+            ),
         }
 
     def _apply_mode(self, mode: EngineMode) -> None:
@@ -900,6 +1019,10 @@ class SessionService:
     def control(self, action: str, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
         if action == "health":
             return self.health()
+        if action == "diagnostics":
+            return self.diagnostics()
+        if action == "self_test":
+            return self.self_test()
         session_id = _required_string(payload, "session_id")
         if action == "status":
             with self._active_lock:

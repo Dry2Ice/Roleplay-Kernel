@@ -586,6 +586,45 @@ class SidecarTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
+    def test_diagnostics_reports_config_without_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=ScriptedProvider(_empty_turn_responses()),
+            )
+            report = service.control("diagnostics", {})
+
+            sidecar = report["sidecar"]
+            self.assertIsInstance(sidecar, dict)
+            if not isinstance(sidecar, dict):
+                self.fail("sidecar block must be an object")
+            self.assertEqual(sidecar["version"], "0.2.0")
+            self.assertIn("python", sidecar)
+            config = report["config"]
+            self.assertIsInstance(config, dict)
+            if not isinstance(config, dict):
+                self.fail("config must be an object")
+            self.assertEqual(config["turn_budget_seconds"], 300.0)
+            self.assertNotIn(TEST_INTEGRATION_KEY, json.dumps(report, default=str))
+
+    def test_self_test_lists_checks_and_skips_upstream_without_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = SessionService(
+                _config(Path(temporary)),
+                provider=ScriptedProvider(_empty_turn_responses()),
+            )
+            report = service.control("self_test", {})
+
+            names = {
+                check["name"]
+                for check in cast(list[JsonValue], report["checks"])
+                if isinstance(check, dict)
+            }
+            self.assertIn("state_dir", names)
+            self.assertIn("integration_key", names)
+            self.assertNotIn("upstream_reachable", names)
+            self.assertFalse(report["ok"])
+
     def test_non_loopback_host_header_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config = _config(Path(temporary))

@@ -25,7 +25,7 @@ export function createHarness({ enabled = false, integrationKey = 'k'.repeat(44)
                 </div>
             </div>
         </body></html>`,
-        { url: 'http://127.0.0.1:8000/', pretendToBeVisual: true },
+        { url: 'http://127.0.0.1:8000/', pretendToBeVisual: true, runScripts: 'outside-only' },
     );
 
     const { window } = dom;
@@ -154,6 +154,7 @@ export function createHarness({ enabled = false, integrationKey = 'k'.repeat(44)
     const previousToastr = globalThis.toastr;
     const previousConsoleError = console.error;
     const previousConsoleWarn = console.warn;
+    const previousConsoleLog = console.log;
     globalThis.toastr = {
         info: message => toasts.push(['info', message]),
         success: message => toasts.push(['success', message]),
@@ -162,6 +163,7 @@ export function createHarness({ enabled = false, integrationKey = 'k'.repeat(44)
     };
     console.error = (...args) => errors.push(args.map(String).join(' '));
     console.warn = (...args) => errors.push(args.map(String).join(' '));
+    console.log = (...args) => previousConsoleLog('   [harness]', ...args);
 
     globalThis.SillyTavern = {
         getContext: () => context,
@@ -169,9 +171,11 @@ export function createHarness({ enabled = false, integrationKey = 'k'.repeat(44)
     };
 
     async function load() {
+        loadCounter += 1;
         const entry = path.join(extensionDir(), 'index.js');
-        return import(`${pathToFileURL(entry).href}?t=${Date.now()}`);
+        return import(`${pathToFileURL(entry).href}?t=${Date.now()}-${loadCounter}`);
     }
+    let loadCounter = 0;
 
     async function activate() {
         const module = await load();
@@ -188,6 +192,7 @@ export function createHarness({ enabled = false, integrationKey = 'k'.repeat(44)
         globalThis.toastr = previousToastr;
         console.error = previousConsoleError;
         console.warn = previousConsoleWarn;
+        console.log = previousConsoleLog;
         delete globalThis.SillyTavern;
         window.close();
     }

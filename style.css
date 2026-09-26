@@ -134,6 +134,33 @@
     background: rgba(127, 127, 127, 0.18);
 }
 
+.roleplay-kernel-settings .rpk-checks {
+    margin: 6px 0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(127, 127, 127, 0.3));
+}
+
+.roleplay-kernel-settings .rpk-checks[hidden] {
+    display: none;
+}
+
+.roleplay-kernel-settings .rpk-check {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 0.85em;
+    padding: 1px 0;
+}
+
+.roleplay-kernel-settings .rpk-check[data-ok="false"] {
+    color: var(--SmartThemeEmColor, #d9534f);
+}
+
+.roleplay-kernel-settings .rpk-check-detail {
+    opacity: 0.7;
+}
+
 .roleplay-kernel-settings .rpk-section-title {
     margin: 12px 0 4px;
     padding-top: 8px;

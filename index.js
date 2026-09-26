@@ -43,6 +43,34 @@ const statusRequests = new Map();
 let progressTimer = null;
 let verifiedSidecarBase = null;
 let versionWarningShown = null;
+const toasts = [];
+
+function noteToast(kind, message) {
+    toasts.push({ kind, message: String(message) });
+    if (toasts.length > 50) {
+        toasts.shift();
+    }
+    const notify = toastr?.[kind];
+    if (typeof notify === 'function') {
+        notify.call(toastr, message);
+    }
+}
+
+function info(message) {
+    noteToast('info', message);
+}
+
+function success(message) {
+    noteToast('success', message);
+}
+
+function warning(message) {
+    noteToast('warning', message);
+}
+
+function failure(message) {
+    noteToast('error', message);
+}
 let consecutiveStatusFailures = 0;
 
 function getContext() {
@@ -413,7 +441,7 @@ function onSettingsReady(request) {
         request.custom_prompt_post_processing = '';
     } catch (error) {
         request.custom_url = 'http://127.0.0.1:1/v1';
-        toastr.error(`Roleplay Kernel: ${String(error.message || error)}`);
+        failure(`Roleplay Kernel: ${String(error.message || error)}`);
     }
 }
 
@@ -462,7 +490,7 @@ async function refreshRuntimeStatus({ silent = true } = {}) {
     } catch (error) {
         renderRuntimeStatus({ running: false });
         if (!silent) {
-            toastr.error(String(error.message || error));
+            failure(String(error.message || error));
         }
         return null;
     }
@@ -470,7 +498,7 @@ async function refreshRuntimeStatus({ silent = true } = {}) {
 
 async function launchRuntime() {
     try {
-        toastr.info('Starting Roleplay Kernel runtime...');
+        info('Starting Roleplay Kernel runtime...');
         const data = await runtimeRequest('launch');
         if (data.sidecar_url) {
             settings.sidecarUrl = data.sidecar_url;
@@ -482,9 +510,9 @@ async function launchRuntime() {
         saveSettings();
         renderRuntimeStatus(data);
         await activateRouting();
-        toastr.success('Runtime started');
+        success('Runtime started');
     } catch (error) {
-        toastr.error(String(error.message || error));
+        failure(String(error.message || error));
     }
 }
 
@@ -496,9 +524,9 @@ async function stopRuntime() {
         const data = await runtimeRequest('stop');
         renderRuntimeStatus(data);
         verifiedSidecarBase = null;
-        toastr.info('Runtime stopped');
+        info('Runtime stopped');
     } catch (error) {
-        toastr.error(String(error.message || error));
+        failure(String(error.message || error));
     }
 }
 
@@ -519,7 +547,7 @@ function checkVersionCompatibility(health) {
     }
     versionWarningShown = message;
     console.warn(message);
-    toastr.warning(message);
+    warning(message);
 }
 
 async function assertSidecarIdentity(force = false) {
@@ -663,6 +691,108 @@ function renderMetrics(status) {
     }
 }
 
+function renderChecks(report) {
+    const box = document.getElementById('rpk_checks');
+    if (!box) {
+        return;
+    }
+    const checks = Array.isArray(report?.checks) ? report.checks : [];
+    if (!checks.length) {
+        box.hidden = true;
+        box.textContent = '';
+        return;
+    }
+    box.hidden = false;
+    box.replaceChildren();
+    for (const check of checks) {
+        if (!check || typeof check !== 'object') {
+            continue;
+        }
+        const row = document.createElement('div');
+        row.className = 'rpk-check';
+        row.dataset.ok = String(Boolean(check.ok));
+        const mark = document.createElement('strong');
+        mark.textContent = check.ok ? 'OK' : 'FAIL';
+        const name = document.createElement('span');
+        name.textContent = String(check.name ?? '');
+        row.append(mark, name);
+        if (check.detail) {
+            const detail = document.createElement('span');
+            detail.className = 'rpk-check-detail';
+            detail.textContent = String(check.detail);
+            row.append(detail);
+        }
+        box.append(row);
+    }
+}
+
+async function runSelfTest() {
+    const button = document.getElementById('rpk_self_test');
+    if (button) {
+        button.disabled = true;
+    }
+    try {
+        const report = await controlTunnel('self_test', {});
+        renderChecks(report);
+        const failed = (Array.isArray(report?.checks) ? report.checks : [])
+            .filter(check => check && !check.ok)
+            .map(check => check.name);
+        if (failed.length) {
+            failure(`Self-test failed: ${failed.join(', ')}`);
+        } else {
+            success('Self-test passed: every layer is reachable');
+        }
+    } catch (error) {
+        failure(String(error.message || error));
+    } finally {
+        if (button) {
+            button.disabled = false;
+        }
+    }
+}
+
+async function copyDiagnostics() {
+    try {
+        const report = await controlTunnel('diagnostics', {});
+        const status = await safeStatusSnapshot();
+        const payload = {
+            extension_version: EXTENSION_VERSION,
+            st_version: String(getContext().release?.version ?? 'unknown'),
+            st_user_agent: navigator.userAgent,
+            settings: {
+                enabled: Boolean(settings.enabled),
+                autoRoute: Boolean(settings.autoRoute),
+                mode: settings.mode,
+                requestDelaySeconds: settings.requestDelaySeconds,
+                profileSelected: Boolean(settings.profileId),
+                sidecarUrl: settings.sidecarUrl,
+                hasIntegrationKey: Boolean(settings.integrationKey),
+            },
+            runtime: await runtimeRequest('status').catch(error => ({ error: String(error.message || error) })),
+            sidecar: report,
+            status,
+            recent_toasts: toasts.slice(-5),
+        };
+        const text = JSON.stringify(payload, null, 2);
+        await navigator.clipboard.writeText(text);
+        success('Diagnostics copied to the clipboard');
+    } catch (error) {
+        failure(`Could not copy diagnostics: ${String(error.message || error)}`);
+    }
+}
+
+async function safeStatusSnapshot() {
+    const binding = ensureChatBinding();
+    if (!binding) {
+        return null;
+    }
+    try {
+        return await controlTunnel('status', { session_id: binding.sessionId });
+    } catch (error) {
+        return { error: String(error.message || error) };
+    }
+}
+
 const RPK_PHASE_LABELS = {
     starting: 'Preparing request',
     plan: 'Planning the scene',
@@ -782,13 +912,13 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
             if (status.transcript_reconciled && !current.reconciledNotified) {
                 current.reconciledNotified = true;
                 saveChatBinding();
-                toastr.info(
+                info(
                     'Roleplay Kernel: the chat history changed outside the kernel, so the kernel was resynced with SillyTavern.',
                 );
             }
             consecutiveStatusFailures = 0;
             if (!silent) {
-                toastr.success('Roleplay Kernel connected');
+                success('Roleplay Kernel connected');
             }
             return status;
         } catch (error) {
@@ -805,7 +935,7 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
                 autoReleaseRouting();
             }
             if (!silent) {
-                toastr.error(String(error.message || error));
+                failure(String(error.message || error));
             }
             return null;
         } finally {
@@ -828,7 +958,7 @@ function autoReleaseRouting() {
     }
     saveSettings();
     renderRuntimeStatus({ running: false });
-    toastr.warning(
+    warning(
         'Roleplay Kernel: runtime is unreachable, routing disabled. The ST connection was restored.',
     );
 }
@@ -919,7 +1049,7 @@ async function activateRouting() {
         if (!status) {
             throw new Error('Sidecar did not respond');
         }
-        toastr.success('Roleplay Kernel activated for the Custom OpenAI source');
+        success('Roleplay Kernel activated for the Custom OpenAI source');
     } catch (error) {
         settings.enabled = false;
         if (!settings.previousConnection) {
@@ -933,7 +1063,7 @@ async function activateRouting() {
             restorePreviousConnection();
         }
         saveSettings();
-        toastr.error(String(error.message || error));
+        failure(String(error.message || error));
     }
 }
 
@@ -943,7 +1073,7 @@ function disableRouting() {
     restorePreviousConnection();
     saveSettings();
     renderStatus(null);
-    toastr.info('Roleplay Kernel routing disabled');
+    info('Roleplay Kernel routing disabled');
 }
 
 async function runControl(action) {
@@ -979,9 +1109,9 @@ async function runControl(action) {
         saveChatBinding();
         renderStatus(status);
         renderProgress(status.progress);
-        toastr.success('State updated');
+        success('State updated');
     } catch (error) {
-        toastr.error(String(error.message || error));
+        failure(String(error.message || error));
     }
 }
 
@@ -991,10 +1121,7 @@ async function contextPopupConfirm(title, message) {
 }
 
 function bindUi() {
-    if (uiReady) {
-        return;
-    }
-    const sidecarUrl = document.getElementById('rpk_sidecar_url');
+    uiReady = false;    const sidecarUrl = document.getElementById('rpk_sidecar_url');
     const integrationKey = document.getElementById('rpk_integration_key');
     const model = document.getElementById('rpk_model');
     const profile = document.getElementById('rpk_profile');
@@ -1009,6 +1136,8 @@ function bindUi() {
     const approve = document.getElementById('rpk_approve');
     const reject = document.getElementById('rpk_reject');
     const reset = document.getElementById('rpk_reset');
+    const selfTest = document.getElementById('rpk_self_test');
+    const diagnostics = document.getElementById('rpk_diagnostics');
     const required = {
         rpk_sidecar_url: sidecarUrl,
         rpk_integration_key: integrationKey,
@@ -1025,6 +1154,8 @@ function bindUi() {
         rpk_approve: approve,
         rpk_reject: reject,
         rpk_reset: reset,
+        rpk_self_test: selfTest,
+        rpk_diagnostics: diagnostics,
     };
     const missing = Object.entries(required)
         .filter(([, element]) => !element)
@@ -1051,7 +1182,7 @@ function bindUi() {
             saveSettings();
             await assertSidecarIdentity(true);
         } catch (error) {
-            toastr.error(String(error.message || error));
+            failure(String(error.message || error));
         }
     });
     integrationKey.addEventListener('change', () => {
@@ -1091,6 +1222,10 @@ function bindUi() {
     approve.addEventListener('click', () => void runControl('commit'));
     reject.addEventListener('click', () => void runControl('reject'));
     reset.addEventListener('click', () => void runControl('reset'));
+    selfTest.addEventListener('click', () => {
+        void runSelfTest();
+    });
+    diagnostics.addEventListener('click', () => void copyDiagnostics());
     renderStatus(null);
     renderProgress(null);
     renderRuntimeStatus({ running: false });
@@ -1145,9 +1280,6 @@ function renderPanelFallback(host, error) {
 }
 
 async function renderUi(attempt = 0) {
-    if (uiReady) {
-        return;
-    }
     const host = document.getElementById('extensions_settings2');
     if (!host) {
         if (attempt < RPK_RENDER_ATTEMPTS) {
@@ -1155,6 +1287,9 @@ async function renderUi(attempt = 0) {
         } else {
             console.error('[RoleplayKernel] container extensions_settings2 not found');
         }
+        return;
+    }
+    if (uiReady && document.getElementById(RPK_PANEL_ID)?.isConnected) {
         return;
     }
     try {
