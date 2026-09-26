@@ -19,6 +19,68 @@ from roleplay_kernel.validators import (
 )
 
 
+class LanguageValidationTests(unittest.TestCase):
+    def test_russian_post_is_flagged_when_english_requested(self) -> None:
+        candidate = (
+            "Колено горело, и он медленно опустился на стул, "
+            "пытаясь перевести дыхание после долгого бега."
+        )
+        findings = validate_candidate(
+            candidate=candidate,
+            previous_assistant_turns=(),
+            activations=(),
+            expected_language="en",
+        )
+        codes = {finding.code for finding in findings}
+        self.assertIn("response_language_mismatch", codes)
+        hard = [f for f in findings if f.code == "response_language_mismatch"]
+        self.assertEqual(hard[0].severity, "hard")
+
+    def test_english_post_is_accepted(self) -> None:
+        candidate = (
+            "His knee was burning, and he lowered himself onto the bench, "
+            "trying to catch his breath after the long run."
+        )
+        findings = validate_candidate(
+            candidate=candidate,
+            previous_assistant_turns=(),
+            activations=(),
+            expected_language="en",
+        )
+        self.assertNotIn(
+            "response_language_mismatch",
+            {finding.code for finding in findings},
+        )
+
+    def test_short_post_is_not_judged(self) -> None:
+        findings = validate_candidate(
+            candidate="Он молчит.",
+            previous_assistant_turns=(),
+            activations=(),
+            expected_language="en",
+        )
+        self.assertNotIn(
+            "response_language_mismatch",
+            {finding.code for finding in findings},
+        )
+
+    def test_russian_target_is_not_enforced(self) -> None:
+        candidate = (
+            "His knee was burning, and he lowered himself onto the bench, "
+            "trying to catch his breath after the long run."
+        )
+        findings = validate_candidate(
+            candidate=candidate,
+            previous_assistant_turns=(),
+            activations=(),
+            expected_language="ru",
+        )
+        self.assertNotIn(
+            "response_language_mismatch",
+            {finding.code for finding in findings},
+        )
+
+
 class ValidationTests(unittest.TestCase):
     def test_speaker_label_and_runtime_leak_are_hard_findings(self) -> None:
         findings = validate_candidate(

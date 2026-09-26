@@ -703,6 +703,7 @@ class Engine:
                 turn.content for turn in session._turns if turn.role == "assistant"
             ),
             activations=activations,
+            expected_language=session._state.language,
         )
         if self.config.mode == "lite":
             return (

@@ -433,6 +433,7 @@ def validate_candidate(
     candidate: str,
     previous_assistant_turns: Iterable[str],
     activations: tuple[ModuleActivation, ...],
+    expected_language: str = "en",
 ) -> tuple[Finding, ...]:
     findings: list[Finding] = []
     text = candidate.strip()
@@ -505,7 +506,35 @@ def validate_candidate(
                 confidence=min(1.0, 0.6 + len(repeated) * 0.1),
             )
         )
+    if language_finding := _language_finding(text, expected_language):
+        findings.append(language_finding)
     return tuple(findings)
+
+
+_CYRILLIC_PATTERN = re.compile(r"[\u0400-\u04ff]")
+_LATIN_PATTERN = re.compile(r"[A-Za-z]")
+
+
+def _language_finding(text: str, expected_language: str) -> Finding | None:
+    """Flag a post written in the wrong script for the requested language.
+
+    Only the English target is enforced: the client is English-only, and Latin
+    output is legitimate when Russian is requested (names, quotes, short posts).
+    """
+    if expected_language != "en":
+        return None
+    cyrillic = len(_CYRILLIC_PATTERN.findall(text))
+    latin = len(_LATIN_PATTERN.findall(text))
+    if cyrillic + latin < 40 or cyrillic <= latin:
+        return None
+    return Finding(
+        severity="hard",
+        code="response_language_mismatch",
+        message="Generated post is written in Russian while English was requested",
+        evidence=text[:160],
+        rule="Write the entire post in English",
+        confidence=0.9,
+    )
 
 
 def merge_findings(*groups: Iterable[Finding]) -> tuple[Finding, ...]:

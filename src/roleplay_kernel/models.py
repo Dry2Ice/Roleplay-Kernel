@@ -371,6 +371,32 @@ class Session:
             self.updated_at = utc_now()
             return working.version
 
+    def apply_output_settings(
+        self,
+        *,
+        language: str,
+        pov: str,
+        tense: str,
+    ) -> bool:
+        """Align output settings with the current client configuration.
+
+        These fields only steer rendering; they are not narrative facts, so they
+        may change at any time without touching the state version or the ledger.
+        """
+        with self._lock:
+            changed = (
+                self._state.language != language
+                or self._state.pov != pov
+                or self._state.tense != tense
+            )
+            if not changed:
+                return False
+            self._state.language = language
+            self._state.pov = pov
+            self._state.tense = tense
+            self.updated_at = utc_now()
+            return True
+
     def to_dict(self) -> dict[str, JsonValue]:
         with self._lock:
             return {

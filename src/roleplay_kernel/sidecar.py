@@ -780,6 +780,11 @@ class SessionService:
             record.checkpoint = record.session.to_dict()
             with self._generation_lock:
                 self._apply_mode(envelope.mode)
+                record.session.apply_output_settings(
+                    language=envelope.language,
+                    pov=envelope.pov,
+                    tense=envelope.tense,
+                )
                 self._apply_upstream_profile(
                     envelope.upstream_profile,
                     envelope.request_delay_seconds,

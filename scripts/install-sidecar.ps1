@@ -40,12 +40,10 @@ $RepoIsUiInstall = $RepoRoot.StartsWith(
 )
 if (-not $RepoIsUiInstall) {
     New-Item -ItemType Directory -Path $ExtensionTarget -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $ExtensionTarget "i18n") -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $RepoRoot "manifest.json") -Destination $ExtensionTarget -Force
     Copy-Item -LiteralPath (Join-Path $RepoRoot "index.js") -Destination $ExtensionTarget -Force
     Copy-Item -LiteralPath (Join-Path $RepoRoot "style.css") -Destination $ExtensionTarget -Force
     Copy-Item -LiteralPath (Join-Path $RepoRoot "settings.html") -Destination $ExtensionTarget -Force
-    Copy-Item -LiteralPath (Join-Path $RepoRoot "i18n\ru-ru.json") -Destination (Join-Path $ExtensionTarget "i18n") -Force
 }
 New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $ServerPluginTarget -Force | Out-Null

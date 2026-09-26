@@ -391,6 +391,38 @@ class SidecarTests(unittest.TestCase):
                 )["transcript_matches"]
             )
 
+    def test_language_setting_updates_an_existing_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = ScriptedProvider(_empty_turn_responses() * 2)
+            service = SessionService(_config(Path(temporary)), provider=provider)
+            russian = _envelope_with_history(
+                "chat_lang",
+                [("user", "Привет"), ("assistant", "Колено горело.")],
+            )
+            service.generate(russian, _messages_for_envelope(russian), "Character: Aria")
+            english = _envelope_with_history(
+                "chat_lang",
+                [
+                    ("user", "Привет"),
+                    ("assistant", "Колено горело."),
+                    ("user", "Hello there"),
+                    ("assistant", "Колено горело."),
+                ],
+                language="en",
+            )
+            service.generate(english, _messages_for_envelope(english), "Character: Aria")
+            state = service.control("state", {"session_id": "chat_lang"})
+            self.assertIsInstance(state["state"], dict)
+            if not isinstance(state["state"], dict):
+                self.fail("state must be an object")
+            self.assertEqual(state["state"]["language"], "en")
+            rendered = "\n".join(
+                message.content
+                for call in provider.calls
+                for message in call
+            )
+            self.assertIn("Write the whole post in English now.", rendered)
+
     def test_normal_request_is_idempotent_while_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             provider = _pending_provider()
@@ -769,6 +801,8 @@ def _messages_for_envelope(envelope: GenerationEnvelope) -> list[IncomingMessage
 def _envelope_with_history(
     session_id: str,
     history: Sequence[tuple[str, str]],
+    *,
+    language: str = "ru",
 ) -> GenerationEnvelope:
     transcript = [
         TranscriptItem(index, role, content)
@@ -779,7 +813,7 @@ def _envelope_with_history(
         session_id=session_id,
         generation_type="normal",
         request_key=_new_request_key(),
-        language="ru",
+        language=language,
         pov="third_person_limited",
         tense="past",
         transcript=tuple(transcript),

@@ -29,7 +29,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     profileId: '',
     mode: 'balanced',
     requestDelaySeconds: 0,
-    language: 'ru',
+    language: 'en',
     pov: 'third_person_limited',
     tense: 'past',
     previousConnection: null,
@@ -68,6 +68,7 @@ function ensureSettings() {
         stored[key] ??= value;
     }
     stored.model = DEFAULT_SETTINGS.model;
+    stored.language = DEFAULT_SETTINGS.language;
     settings = stored;
     return settings;
 }
@@ -161,7 +162,7 @@ function refreshProfileOptions() {
     select.replaceChildren();
     const directOption = document.createElement('option');
     directOption.value = '';
-    directOption.textContent = 'Прямой upstream из sidecar config';
+    directOption.textContent = 'Direct upstream from sidecar config';
     select.append(directOption);
     for (const profile of profiles) {
         const option = document.createElement('option');
@@ -173,8 +174,8 @@ function refreshProfileOptions() {
     if (hint) {
         const selected = selectedConnectionProfile();
         hint.textContent = selected
-            ? `Профиль: ${selected.name || selected.id}; API key остаётся в secrets.json ST.`
-            : 'Выберите сохранённый профиль ST или используйте ручную конфигурацию sidecar.';
+            ? `Profile: ${selected.name || selected.id}; the API key stays in ST secrets.json.`
+            : 'Select a saved ST profile or use the manual sidecar configuration.';
     }
 }
 
@@ -424,11 +425,11 @@ async function runtimeRequest(action) {
             headers: context.getRequestHeaders(),
         });
     } catch (error) {
-        throw new Error(`Server plugin недоступен: ${String(error.message || error)}`);
+        throw new Error(`Server plugin unavailable: ${String(error.message || error)}`);
     }
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data?.error) {
-        throw new Error(data?.error || `Server plugin вернул HTTP ${response.status}`);
+        throw new Error(data?.error || `Server plugin returned HTTP ${response.status}`);
     }
     return data;
 }
@@ -440,8 +441,8 @@ function renderRuntimeStatus(data) {
     const running = Boolean(data?.running);
     if (label) {
         label.textContent = running
-            ? `Runtime: запущен${data.port ? ` (порт ${data.port})` : ''}`
-            : 'Runtime: не запущен';
+            ? `Runtime: running${data.port ? ` (port ${data.port})` : ''}`
+            : 'Runtime: stopped';
     }
     if (launch) {
         launch.disabled = running;
@@ -467,7 +468,7 @@ async function refreshRuntimeStatus({ silent = true } = {}) {
 
 async function launchRuntime() {
     try {
-        toastr.info('Запуск Roleplay Kernel runtime…');
+        toastr.info('Starting Roleplay Kernel runtime...');
         const data = await runtimeRequest('launch');
         if (data.sidecar_url) {
             settings.sidecarUrl = data.sidecar_url;
@@ -479,7 +480,7 @@ async function launchRuntime() {
         saveSettings();
         renderRuntimeStatus(data);
         await activateRouting();
-        toastr.success('Runtime запущен');
+        toastr.success('Runtime started');
     } catch (error) {
         toastr.error(String(error.message || error));
     }
@@ -493,7 +494,7 @@ async function stopRuntime() {
         const data = await runtimeRequest('stop');
         renderRuntimeStatus(data);
         verifiedSidecarBase = null;
-        toastr.info('Runtime остановлен');
+        toastr.info('Runtime stopped');
     } catch (error) {
         toastr.error(String(error.message || error));
     }
@@ -514,14 +515,14 @@ async function assertSidecarIdentity(force = false) {
         });
     } catch (error) {
         verifiedSidecarBase = null;
-        throw new Error(`Sidecar недоступен на ${baseUrl}: ${String(error.message || error)}`);
+        throw new Error(`Sidecar is not reachable at ${baseUrl}: ${String(error.message || error)}`);
     }
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data?.service !== 'roleplay-kernel-sidecar') {
         verifiedSidecarBase = null;
         throw new Error(
-            `Порт ${baseUrl} занят не Roleplay Kernel sidecar `
-            + `(service=${data?.service || 'нет ответа'})`,
+            `Port ${baseUrl} is not a Roleplay Kernel sidecar `
+            + `(service=${data?.service || 'no response'})`,
         );
     }
     verifiedSidecarBase = baseUrl;
@@ -569,28 +570,28 @@ function renderStatus(status) {
         return;
     }
     if (!status) {
-        state.textContent = 'Не подключено';
+        state.textContent = 'Not connected';
         version.textContent = '';
         details.textContent = '';
         approve.disabled = true;
         reject.disabled = true;
-        renderHeaderStatus('не подключено', 'offline');
+        renderHeaderStatus('not connected', 'offline');
         return;
     }
     const running = status.status === 'running';
     state.textContent = running
-        ? 'Выполняется запрос'
-        : (status.exists ? 'Подключено' : 'Сессия ещё не создана');
+        ? 'Request in progress'
+        : (status.exists ? 'Connected' : 'No session yet');
     version.textContent = running
         ? `v${status.version || '—'} · state ${status.state_version > 0 ? status.state_version : '—'}`
         : `v${status.version || '—'} · state ${status.state_version || 0}`;
     const findings = Array.isArray(status.findings) ? status.findings : [];
     const hard = findings.filter(item => item?.severity === 'hard').length;
     details.textContent = [
-        status.transcript_matches === false ? 'Транскрипт рассинхронизирован' : null,
-        `Режим: ${status.status || 'idle'}`,
-        `Модулей: ${Array.isArray(status.active_modules) ? status.active_modules.length : 0}`,
-        `Ошибок critic: ${hard}`,
+        status.transcript_matches === false ? 'Transcript out of sync' : null,
+        `Mode: ${status.status || 'idle'}`,
+        `Modules: ${Array.isArray(status.active_modules) ? status.active_modules.length : 0}`,
+        `Critic errors: ${hard}`,
         `Pending: ${status.pending_count || 0}`,
     ].filter(Boolean).join(' · ');
     approve.disabled = !status.pending_request_id;
@@ -598,23 +599,23 @@ function renderStatus(status) {
     if (!running && status.status !== 'error') {
         const pending = status.pending_count || 0;
         renderHeaderStatus(
-            pending > 0 ? `ожидает подтверждения: ${pending}` : 'готова к работе',
+            pending > 0 ? `awaiting confirmation: ${pending}` : 'ready',
             'ok',
         );
     }
 }
 
 const RPK_PHASE_LABELS = {
-    starting: 'Подготовка запроса',
-    plan: 'Планирование сцены',
-    render: 'Генерация ответа модели',
-    extract: 'Извлечение изменений состояния',
-    critic: 'Проверка ответа',
-    repair: 'Исправление ответа',
-    fallback: 'Аварийный ответ без планирования',
-    done: 'Готово',
-    idle: 'Kernel свободен',
-    error: 'Ошибка запроса',
+    starting: 'Preparing request',
+    plan: 'Planning the scene',
+    render: 'Generating the reply',
+    extract: 'Extracting state changes',
+    critic: 'Reviewing the reply',
+    repair: 'Repairing the reply',
+    fallback: 'Fallback reply without planning',
+    done: 'Done',
+    idle: 'Kernel idle',
+    error: 'Request failed',
 };
 
 function renderHeaderStatus(text, state) {
@@ -638,7 +639,7 @@ function renderProgress(progress) {
     const total = Number(progress?.total) || 0;
     const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
     const phase = typeof progress?.phase === 'string' ? progress.phase : 'idle';
-    const phaseLabel = RPK_PHASE_LABELS[phase] || progress?.message || 'Обработка';
+    const phaseLabel = RPK_PHASE_LABELS[phase] || progress?.message || 'Working';
     if (card) {
         card.classList.toggle('is-active', active);
         card.classList.toggle('is-error', phase === 'error');
@@ -661,12 +662,12 @@ function renderProgress(progress) {
             && progress.message !== phaseLabel
             ? progress.message
             : null;
-        text.textContent = detail || (active ? 'Запрос выполняется, обновление каждую секунду' : 'Готов к работе');
+        text.textContent = detail || (active ? 'Request running, refreshing every second' : 'Ready');
     }
     if (active) {
         renderHeaderStatus(`${phaseLabel} ${completed}/${total || '?'}`, 'running');
     } else if (phase === 'error') {
-        renderHeaderStatus('ошибка', 'error');
+        renderHeaderStatus('error', 'error');
     }
 }
 
@@ -723,12 +724,12 @@ async function refreshStatus({ silent = false, includeTranscript = true } = {}) 
                 current.reconciledNotified = true;
                 saveChatBinding();
                 toastr.info(
-                    'Roleplay Kernel: история чата была изменена вне ядра, ядро синхронизировано с SillyTavern.',
+                    'Roleplay Kernel: the chat history changed outside the kernel, so the kernel was resynced with SillyTavern.',
                 );
             }
             consecutiveStatusFailures = 0;
             if (!silent) {
-                toastr.success('Roleplay Kernel подключён');
+                toastr.success('Roleplay Kernel connected');
             }
             return status;
         } catch (error) {
@@ -769,7 +770,7 @@ function autoReleaseRouting() {
     saveSettings();
     renderRuntimeStatus({ running: false });
     toastr.warning(
-        'Roleplay Kernel: runtime недоступен, маршрутизация отключена. Подключение ST восстановлено.',
+        'Roleplay Kernel: runtime is unreachable, routing disabled. The ST connection was restored.',
     );
 }
 
@@ -835,14 +836,14 @@ async function activateRouting() {
         ensureSettings();
         const context = getContext();
         if (context.mainApi !== 'openai') {
-            throw new Error('Сначала выберите Chat Completion API');
+            throw new Error('Select a Chat Completion API first');
         }
         if (
             !settings.integrationKey
             || settings.integrationKey.length < 32
             || /[^\u0021-\u007e]/.test(settings.integrationKey)
         ) {
-            throw new Error('Укажите корректный integration key длиной не менее 32 символов');
+            throw new Error('Provide a valid integration key of at least 32 characters');
         }
         await controlTunnel('health');
         settings.previousConnection ??= previous;
@@ -857,9 +858,9 @@ async function activateRouting() {
         saveSettings();
         const status = await refreshStatus();
         if (!status) {
-            throw new Error('Sidecar не ответил');
+            throw new Error('Sidecar did not respond');
         }
-        toastr.success('Roleplay Kernel активирован для Custom OpenAI source');
+        toastr.success('Roleplay Kernel activated for the Custom OpenAI source');
     } catch (error) {
         settings.enabled = false;
         if (!settings.previousConnection) {
@@ -883,7 +884,7 @@ function disableRouting() {
     restorePreviousConnection();
     saveSettings();
     renderStatus(null);
-    toastr.info('Roleplay Kernel routing отключён');
+    toastr.info('Roleplay Kernel routing disabled');
 }
 
 async function runControl(action) {
@@ -893,8 +894,8 @@ async function runControl(action) {
     }
     if (action === 'reset') {
         const confirmed = await contextPopupConfirm(
-            'Сбросить состояние Roleplay Kernel?',
-            'История SillyTavern сохранится, но каноническое состояние ядра будет удалено.',
+            'Reset Roleplay Kernel state?',
+            'The SillyTavern chat is kept, but the canonical kernel state is deleted.',
         );
         if (!confirmed) {
             return;
@@ -919,7 +920,7 @@ async function runControl(action) {
         saveChatBinding();
         renderStatus(status);
         renderProgress(status.progress);
-        toastr.success('Состояние обновлено');
+        toastr.success('State updated');
     } catch (error) {
         toastr.error(String(error.message || error));
     }
@@ -940,7 +941,6 @@ function bindUi() {
     const profile = document.getElementById('rpk_profile');
     const mode = document.getElementById('rpk_mode');
     const requestDelay = document.getElementById('rpk_request_delay');
-    const language = document.getElementById('rpk_language');
     const autoRoute = document.getElementById('rpk_auto_route');
     const launch = document.getElementById('rpk_launch');
     const stop = document.getElementById('rpk_stop');
@@ -957,7 +957,6 @@ function bindUi() {
         rpk_profile: profile,
         rpk_mode: mode,
         rpk_request_delay: requestDelay,
-        rpk_language: language,
         rpk_auto_route: autoRoute,
         rpk_launch: launch,
         rpk_stop: stop,
@@ -983,7 +982,6 @@ function bindUi() {
     model.value = settings.model;
     mode.value = settings.mode;
     requestDelay.value = String(settings.requestDelaySeconds ?? 0);
-    language.value = settings.language;
     autoRoute.checked = settings.autoRoute;
     refreshProfileOptions();
     sidecarUrl.addEventListener('change', async () => {
@@ -1020,10 +1018,6 @@ function bindUi() {
         const value = Math.max(0, Math.min(600, Number(requestDelay.value) || 0));
         settings.requestDelaySeconds = value;
         requestDelay.value = String(value);
-        saveSettings();
-    });
-    language.addEventListener('change', () => {
-        settings.language = language.value;
         saveSettings();
     });
     autoRoute.addEventListener('change', () => {
@@ -1073,13 +1067,13 @@ function renderPanelFallback(host, error) {
             <div class="inline-drawer">
                 <div class="inline-drawer-toggle inline-drawer-header">
                     <b>Roleplay Kernel</b>
-                    <span class="rpk-header-status" data-state="error">ошибка панели</span>
+                    <span class="rpk-header-status" data-state="error">panel error</span>
                     <div class="inline-drawer-icon fa-solid fa-circle-chevron-up up"></div>
                 </div>
                 <div class="inline-drawer-content" style="display: block;">
-                    <small class="rpk-details">Не удалось загрузить панель настроек: ${escapeHtml(String(error?.message || error))}</small>
+                    <small class="rpk-details">Could not load the settings panel: ${escapeHtml(String(error?.message || error))}</small>
                     <div class="rpk-actions">
-                        <button id="rpk_panel_retry" class="menu-button"><i class="fa-solid fa-rotate"></i><span>Повторить</span></button>
+                        <button id="rpk_panel_retry" class="menu-button"><i class="fa-solid fa-rotate"></i><span>Retry</span></button>
                     </div>
                 </div>
             </div>
