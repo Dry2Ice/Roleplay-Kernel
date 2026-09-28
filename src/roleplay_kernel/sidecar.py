@@ -74,6 +74,7 @@ _CONFIG_KEYS = {
     "turn_budget_seconds",
     "post_render_grace_seconds",
     "require_upstream_profile",
+    "stage_profiles",
 }
 
 
