@@ -44,7 +44,7 @@ from .providers import (
 from .summarizer import SummaryConfig, TranscriptSummarizer
 from .utils import ProviderError
 
-SIDECAR_VERSION = "0.12.0"
+SIDECAR_VERSION = "0.12.1"
 PROTOCOL_VERSION = 1
 ENVELOPE_PREFIX = "[ROLEPLAY_KERNEL_ENVELOPE_V1]"
 CONTROL_PREFIX = "[ROLEPLAY_KERNEL_CONTROL_V1]"
@@ -797,6 +797,7 @@ class SessionService:
                 "post_render_grace_seconds": config.post_render_grace_seconds,
                 "allow_insecure_http": config.allow_insecure_http,
                 "require_upstream_profile": config.require_upstream_profile,
+                "stage_profiles": cast(JsonValue, self._router.describe()),
                 "state_dir": str(config.state_dir),
             },
             "upstream": {
@@ -953,10 +954,13 @@ class SessionService:
             for key, value in raw_profiles.items():
                 if isinstance(value, str):
                     stage_profiles[str(key)] = value
+        current_override = getattr(self._router, "_override", None)
         self._router = ProfileRouter(
             self.provider,
             stage_map=stage_profiles,
         )
+        if current_override is not None:
+            self._router.override(current_override)
         summary_value = payload.get("summary")
         if isinstance(summary_value, dict):
             enabled = bool(summary_value.get("enabled", False))
