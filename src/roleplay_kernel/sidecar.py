@@ -44,7 +44,7 @@ from .providers import (
 from .summarizer import SummaryConfig, TranscriptSummarizer
 from .utils import ProviderError
 
-SIDECAR_VERSION = "0.11.0"
+SIDECAR_VERSION = "0.12.0"
 PROTOCOL_VERSION = 1
 ENVELOPE_PREFIX = "[ROLEPLAY_KERNEL_ENVELOPE_V1]"
 CONTROL_PREFIX = "[ROLEPLAY_KERNEL_CONTROL_V1]"
@@ -946,6 +946,45 @@ class SessionService:
             "provider": type(self.provider).__name__,
         }
 
+    def _update_config(self, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        stage_profiles: dict[str, str] = {}
+        raw_profiles = payload.get("stage_profiles")
+        if isinstance(raw_profiles, dict):
+            for key, value in raw_profiles.items():
+                if isinstance(value, str):
+                    stage_profiles[str(key)] = value
+        self._router = ProfileRouter(
+            self.provider,
+            stage_map=stage_profiles,
+        )
+        summary_value = payload.get("summary")
+        if isinstance(summary_value, dict):
+            enabled = bool(summary_value.get("enabled", False))
+            keep = _config_int(summary_value.get("keep_recent_pairs"), 6)
+            every = _config_int(summary_value.get("summarize_every_pairs"), 4)
+            hide = _config_int(summary_value.get("hide_old_after_pairs"), 24)
+            self.engine._summarizer = TranscriptSummarizer(
+                SummaryConfig(
+                    enabled=enabled,
+                    keep_recent_pairs=keep,
+                    summarize_every_pairs=every,
+                    hide_old_after_pairs=hide,
+                )
+            )
+        budgets = payload.get("budgets")
+        if isinstance(budgets, dict):
+            self.engine.config = replace(
+                self.engine.config,
+                plan_max_tokens=_config_int(budgets.get("plan_max_tokens"), 0),
+                extract_max_tokens=_config_int(budgets.get("extract_max_tokens"), 0),
+                critic_max_tokens=_config_int(budgets.get("critic_max_tokens"), 0),
+                summarize_max_tokens=_config_int(budgets.get("summarize_max_tokens"), 0),
+            )
+        return {
+            "stage_profiles": cast(JsonValue, stage_profiles),
+            "router": cast(JsonValue, self._router.describe()),
+        }
+
     def _apply_upstream_profile(
         self,
         profile: STProfileConfig | None,
@@ -1118,6 +1157,8 @@ class SessionService:
             return self.self_test()
         if action == "select_profile":
             return self._select_profile(payload)
+        if action == "update_config":
+            return self._update_config(payload)
         session_id = _required_string(payload, "session_id")
         if action == "status":
             with self._active_lock:

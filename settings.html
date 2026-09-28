@@ -85,6 +85,69 @@
                 <small class="rpk-details">Counted from the start of the previous response.</small>
             </label>
 
+            <div class="rpk-section-title">Model Profiles</div>
+            <small class="rpk-details">Assign a saved ST profile to each pipeline stage. Empty = use the default provider.</small>
+            <label class="rpk-field">
+                <span>Render (creative prose)</span>
+                <select id="rpk_stage_render"><option value="">Default</option></select>
+            </label>
+            <label class="rpk-field">
+                <span>Extract (state extraction)</span>
+                <select id="rpk_stage_extract"><option value="">Default</option></select>
+            </label>
+            <label class="rpk-field">
+                <span>Critic (quality check)</span>
+                <select id="rpk_stage_critic"><option value="">Default</option></select>
+            </label>
+            <label class="rpk-field">
+                <span>Repair (post-critic fix)</span>
+                <select id="rpk_stage_repair"><option value="">Default</option></select>
+            </label>
+            <label class="rpk-field">
+                <span>Plan (scene planning)</span>
+                <select id="rpk_stage_plan"><option value="">Default</option></select>
+            </label>
+            <label class="rpk-field">
+                <span>Summarize (context compression)</span>
+                <select id="rpk_stage_summarize"><option value="">Default</option></select>
+            </label>
+
+            <div class="rpk-section-title">Summarization</div>
+            <label class="rpk-checkbox">
+                <input id="rpk_summary_enabled" type="checkbox" />
+                <span>Enable transcript summarization</span>
+            </label>
+            <label class="rpk-field">
+                <span>Keep recent pairs</span>
+                <input id="rpk_summary_keep" type="number" min="2" max="20" step="1" />
+            </label>
+            <label class="rpk-field">
+                <span>Summarize every N pairs</span>
+                <input id="rpk_summary_every" type="number" min="1" max="20" step="1" />
+            </label>
+            <label class="rpk-field">
+                <span>Hide old after N pairs</span>
+                <input id="rpk_summary_hide" type="number" min="2" max="60" step="1" />
+            </label>
+
+            <div class="rpk-section-title">Stage Budgets</div>
+            <label class="rpk-field">
+                <span>Plan max tokens (0 = default)</span>
+                <input id="rpk_budget_plan" type="number" min="0" max="8192" step="1" />
+            </label>
+            <label class="rpk-field">
+                <span>Extract max tokens (0 = default)</span>
+                <input id="rpk_budget_extract" type="number" min="0" max="8192" step="1" />
+            </label>
+            <label class="rpk-field">
+                <span>Critic max tokens (0 = default)</span>
+                <input id="rpk_budget_critic" type="number" min="0" max="8192" step="1" />
+            </label>
+            <label class="rpk-field">
+                <span>Summarize max tokens (0 = default)</span>
+                <input id="rpk_budget_summarize" type="number" min="0" max="8192" step="1" />
+            </label>
+
             <div class="rpk-section-title">Pending state changes</div>
             <div id="rpk_delta" class="rpk-delta"></div>
 

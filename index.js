@@ -4,7 +4,7 @@ const ENVELOPE_PREFIX = '[ROLEPLAY_KERNEL_ENVELOPE_V1]';
 const CONTROL_PREFIX = '[ROLEPLAY_KERNEL_CONTROL_V1]';
 const CONTROL_MODEL_PREFIX = 'roleplay-kernel-control/';
 const RUNTIME_PLUGIN_ID = 'roleplay-kernel';
-const EXTENSION_VERSION = '0.11.0';
+const EXTENSION_VERSION = '0.12.0';
 const SUPPORTED_GENERATIONS = new Set(['normal', 'regenerate', 'swipe']);
 const SUPPORTED_PROFILE_SOURCES = new Set(['openai', 'custom']);
 const SAMPLING_FIELDS = [
@@ -34,6 +34,15 @@ const DEFAULT_SETTINGS = Object.freeze({
     pov: 'third_person_limited',
     tense: 'past',
     previousConnection: null,
+    stageProfiles: {},
+    summaryEnabled: false,
+    summaryKeepPairs: 6,
+    summaryEveryPairs: 4,
+    summaryHidePairs: 24,
+    budgetPlanTokens: 0,
+    budgetExtractTokens: 0,
+    budgetCriticTokens: 0,
+    budgetSummarizeTokens: 0,
 });
 
 let settings = null;
@@ -165,6 +174,50 @@ function profilePayload(profile) {
         model: String(profile.model || ''),
         secret_id: String(profile['secret-id'] || ''),
     };
+}
+
+function populateStageProfiles() {
+    if (!settings) {
+        return;
+    }
+    const stageIds = ['render', 'extract', 'critic', 'repair', 'plan', 'summarize'];
+    const profiles = connectionProfiles();
+    for (const stage of stageIds) {
+        const select = document.getElementById(`rpk_stage_${stage}`);
+        if (!select) {
+            continue;
+        }
+        select.replaceChildren();
+        const defaultOption = document.createElement('option');
+        defaultOption.value = '';
+        defaultOption.textContent = 'Default';
+        select.append(defaultOption);
+        for (const profile of profiles) {
+            const option = document.createElement('option');
+            option.value = String(profile.id);
+            option.textContent = `${profile.name || profile.id} · ${profileSource(profile)}`;
+            select.append(option);
+        }
+        select.value = settings.stageProfiles[stage] || '';
+    }
+}
+
+function pushStageConfig() {
+    return controlTunnel('update_config', {
+        stage_profiles: settings.stageProfiles,
+        summary: {
+            enabled: settings.summaryEnabled,
+            keep_recent_pairs: settings.summaryKeepPairs,
+            summarize_every_pairs: settings.summaryEveryPairs,
+            hide_old_after_pairs: settings.summaryHidePairs,
+        },
+        budgets: {
+            plan_max_tokens: settings.budgetPlanTokens,
+            extract_max_tokens: settings.budgetExtractTokens,
+            critic_max_tokens: settings.budgetCriticTokens,
+            summarize_max_tokens: settings.budgetSummarizeTokens,
+        },
+    });
 }
 
 function refreshProfileOptions() {
@@ -384,6 +437,19 @@ function onPromptReady(data) {
         language: settings.language,
         pov: settings.pov,
         tense: settings.tense,
+        stage_profiles: settings.stageProfiles,
+        summary: {
+            enabled: settings.summaryEnabled,
+            keep_recent_pairs: settings.summaryKeepPairs,
+            summarize_every_pairs: settings.summaryEveryPairs,
+            hide_old_after_pairs: settings.summaryHidePairs,
+        },
+        budgets: {
+            plan_max_tokens: settings.budgetPlanTokens,
+            extract_max_tokens: settings.budgetExtractTokens,
+            critic_max_tokens: settings.budgetCriticTokens,
+            summarize_max_tokens: settings.budgetSummarizeTokens,
+        },
     };
     const profile = selectedConnectionProfile();
     if (profile) {
@@ -1391,6 +1457,20 @@ function bindUi() {
     const mode = document.getElementById('rpk_mode');
     const requestDelay = document.getElementById('rpk_request_delay');
     const autoRoute = document.getElementById('rpk_auto_route');
+    const stageRender = document.getElementById('rpk_stage_render');
+    const stageExtract = document.getElementById('rpk_stage_extract');
+    const stageCritic = document.getElementById('rpk_stage_critic');
+    const stageRepair = document.getElementById('rpk_stage_repair');
+    const stagePlan = document.getElementById('rpk_stage_plan');
+    const stageSummarize = document.getElementById('rpk_stage_summarize');
+    const summaryEnabled = document.getElementById('rpk_summary_enabled');
+    const summaryKeep = document.getElementById('rpk_summary_keep');
+    const summaryEvery = document.getElementById('rpk_summary_every');
+    const summaryHide = document.getElementById('rpk_summary_hide');
+    const budgetPlan = document.getElementById('rpk_budget_plan');
+    const budgetExtract = document.getElementById('rpk_budget_extract');
+    const budgetCritic = document.getElementById('rpk_budget_critic');
+    const budgetSummarize = document.getElementById('rpk_budget_summarize');
     const launch = document.getElementById('rpk_launch');
     const stop = document.getElementById('rpk_stop');
     const activate = document.getElementById('rpk_activate');
@@ -1409,6 +1489,20 @@ function bindUi() {
         rpk_mode: mode,
         rpk_request_delay: requestDelay,
         rpk_auto_route: autoRoute,
+        rpk_stage_render: stageRender,
+        rpk_stage_extract: stageExtract,
+        rpk_stage_critic: stageCritic,
+        rpk_stage_repair: stageRepair,
+        rpk_stage_plan: stagePlan,
+        rpk_stage_summarize: stageSummarize,
+        rpk_summary_enabled: summaryEnabled,
+        rpk_summary_keep: summaryKeep,
+        rpk_summary_every: summaryEvery,
+        rpk_summary_hide: summaryHide,
+        rpk_budget_plan: budgetPlan,
+        rpk_budget_extract: budgetExtract,
+        rpk_budget_critic: budgetCritic,
+        rpk_budget_summarize: budgetSummarize,
         rpk_launch: launch,
         rpk_stop: stop,
         rpk_activate: activate,
@@ -1437,6 +1531,21 @@ function bindUi() {
     requestDelay.value = String(settings.requestDelaySeconds ?? 0);
     autoRoute.checked = settings.autoRoute;
     refreshProfileOptions();
+    populateStageProfiles();
+    stageRender.value = settings.stageProfiles.render || '';
+    stageExtract.value = settings.stageProfiles.extract || '';
+    stageCritic.value = settings.stageProfiles.critic || '';
+    stageRepair.value = settings.stageProfiles.repair || '';
+    stagePlan.value = settings.stageProfiles.plan || '';
+    stageSummarize.value = settings.stageProfiles.summarize || '';
+    summaryEnabled.checked = settings.summaryEnabled;
+    summaryKeep.value = String(settings.summaryKeepPairs);
+    summaryEvery.value = String(settings.summaryEveryPairs);
+    summaryHide.value = String(settings.summaryHidePairs);
+    budgetPlan.value = String(settings.budgetPlanTokens);
+    budgetExtract.value = String(settings.budgetExtractTokens);
+    budgetCritic.value = String(settings.budgetCriticTokens);
+    budgetSummarize.value = String(settings.budgetSummarizeTokens);
     sidecarUrl.addEventListener('change', async () => {
         try {
             settings.sidecarUrl = validateSidecarUrl(sidecarUrl.value);
@@ -1484,6 +1593,111 @@ function bindUi() {
     autoRoute.addEventListener('change', () => {
         settings.autoRoute = autoRoute.checked;
         saveSettings();
+    });
+    stageRender.addEventListener('change', () => {
+        settings.stageProfiles.render = stageRender.value;
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    stageExtract.addEventListener('change', () => {
+        settings.stageProfiles.extract = stageExtract.value;
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    stageCritic.addEventListener('change', () => {
+        settings.stageProfiles.critic = stageCritic.value;
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    stageRepair.addEventListener('change', () => {
+        settings.stageProfiles.repair = stageRepair.value;
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    stagePlan.addEventListener('change', () => {
+        settings.stageProfiles.plan = stagePlan.value;
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    stageSummarize.addEventListener('change', () => {
+        settings.stageProfiles.summarize = stageSummarize.value;
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    summaryEnabled.addEventListener('change', () => {
+        settings.summaryEnabled = summaryEnabled.checked;
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    summaryKeep.addEventListener('change', () => {
+        settings.summaryKeepPairs = Math.max(2, Math.min(20, Number(summaryKeep.value) || 6));
+        summaryKeep.value = String(settings.summaryKeepPairs);
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    summaryEvery.addEventListener('change', () => {
+        settings.summaryEveryPairs = Math.max(1, Math.min(20, Number(summaryEvery.value) || 4));
+        summaryEvery.value = String(settings.summaryEveryPairs);
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    summaryHide.addEventListener('change', () => {
+        settings.summaryHidePairs = Math.max(2, Math.min(60, Number(summaryHide.value) || 24));
+        summaryHide.value = String(settings.summaryHidePairs);
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    budgetPlan.addEventListener('change', () => {
+        settings.budgetPlanTokens = Math.max(0, Math.min(8192, Number(budgetPlan.value) || 0));
+        budgetPlan.value = String(settings.budgetPlanTokens);
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    budgetExtract.addEventListener('change', () => {
+        settings.budgetExtractTokens = Math.max(0, Math.min(8192, Number(budgetExtract.value) || 0));
+        budgetExtract.value = String(settings.budgetExtractTokens);
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    budgetCritic.addEventListener('change', () => {
+        settings.budgetCriticTokens = Math.max(0, Math.min(8192, Number(budgetCritic.value) || 0));
+        budgetCritic.value = String(settings.budgetCriticTokens);
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
+    });
+    budgetSummarize.addEventListener('change', () => {
+        settings.budgetSummarizeTokens = Math.max(0, Math.min(8192, Number(budgetSummarize.value) || 0));
+        budgetSummarize.value = String(settings.budgetSummarizeTokens);
+        saveSettings();
+        if (settings.enabled) {
+            void pushStageConfig().catch(() => {});
+        }
     });
     launch.addEventListener('click', () => void launchRuntime());
     stop.addEventListener('click', () => void stopRuntime());
